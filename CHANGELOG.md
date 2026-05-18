@@ -1,3 +1,15 @@
+## 0.2.0
+
+- Connectivity-aware periodic retries. `OfflineBroadcast.withNdk()` now
+  subscribes to `ndk.connectivity.relayConnectivityChanges` and pauses the
+  internal timer while no public relay is connected. The `offline -> online`
+  edge triggers an immediate replay. `retryNow()` always bypasses the check.
+- Local/private hosts (loopback, RFC1918 IPv4, ULA/link-local IPv6, mDNS
+  `.local`) are filtered out when deriving the online signal, so a connected
+  dev relay on localhost cannot mask a real outage.
+- The default constructor accepts an optional `Stream<bool> onlineSignal`
+  for callers who want to wire their own connectivity source.
+
 ## 0.1.0
 
 Initial release.

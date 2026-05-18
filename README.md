@@ -79,9 +79,31 @@ the missing relays get pushed.
 
 ### `retryNow()`
 
-Forces an immediate scan of due entries. Wire this to your connectivity
-signal (e.g. `connectivity_plus`) so the shim retries the moment the device
-comes back online rather than waiting for the next periodic tick.
+Forces an immediate scan of due entries, bypassing the online check. Use it
+as an explicit override (e.g. when the user pulls to refresh).
+
+### Connectivity awareness
+
+`OfflineBroadcast.withNdk()` subscribes to
+`ndk.connectivity.relayConnectivityChanges` and pauses the periodic retry
+timer while no public relay is connected. As soon as a public relay comes
+online, the shim replays everything that's due. Loopback addresses, RFC1918
+IPv4, ULA/link-local IPv6, and mDNS `.local` names are excluded from the
+"is online" computation so a local dev relay cannot mask a real outage.
+
+For non-NDK setups, pass any `Stream<bool> onlineSignal` to the default
+constructor:
+
+```dart
+OfflineBroadcast(
+  broadcastFn: ...,
+  db: db,
+  onlineSignal: yourConnectivityStream, // true while online, false otherwise
+);
+```
+
+If you don't pass anything, the shim assumes it is always online and the
+periodic timer runs unconditionally (pre-0.2 behavior).
 
 ### `rebroadcast(id, {String? relay})`
 

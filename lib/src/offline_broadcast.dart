@@ -8,6 +8,7 @@ import 'package:sembast/sembast.dart';
 import 'backoff.dart';
 import 'queue_store.dart';
 import 'queued_broadcast.dart';
+import 'relay_host_filter.dart';
 
 /// Function that hands an event off to the network. Matches the call pattern
 /// of `Ndk.broadcast.broadcast` with `specificRelays` always provided.
@@ -31,8 +32,11 @@ class OfflineBroadcast {
   final Duration _perAttemptTimeout;
   final Random _random;
   final int Function() _now;
+  final Stream<bool>? _onlineSignal;
 
   Timer? _tickTimer;
+  StreamSubscription<bool>? _onlineSub;
+  bool _isOnline = true;
   final Map<String, Future<void>> _inFlight = <String, Future<void>>{};
   bool _disposed = false;
 
@@ -44,6 +48,7 @@ class OfflineBroadcast {
     required Duration initialBackoff,
     required Duration maxBackoff,
     required Duration perAttemptTimeout,
+    Stream<bool>? onlineSignal,
     Random? random,
     int Function()? now,
   }) : _broadcastFn = broadcastFn,
@@ -52,11 +57,18 @@ class OfflineBroadcast {
        _initialBackoff = initialBackoff,
        _maxBackoff = maxBackoff,
        _perAttemptTimeout = perAttemptTimeout,
+       _onlineSignal = onlineSignal,
        _random = random ?? Random(),
        _now = now ?? (() => DateTime.now().millisecondsSinceEpoch);
 
   /// Default constructor: inject the broadcast function explicitly.
   /// Useful for tests or for callers who already wrap NDK.
+  ///
+  /// Pass [onlineSignal] to make the periodic retry loop connectivity-aware:
+  /// while the latest emission is `false`, periodic ticks are no-ops, and the
+  /// `false -> true` edge triggers an immediate retry pass. `retryNow()`
+  /// always runs regardless of this signal. If [onlineSignal] is null the
+  /// shim assumes it is always online.
   factory OfflineBroadcast({
     required BroadcastFn broadcastFn,
     required Database db,
@@ -65,6 +77,7 @@ class OfflineBroadcast {
     Duration initialBackoff = const Duration(seconds: 5),
     Duration maxBackoff = const Duration(minutes: 30),
     Duration perAttemptTimeout = const Duration(seconds: 10),
+    Stream<bool>? onlineSignal,
     Random? random,
     int Function()? now,
   }) {
@@ -76,12 +89,19 @@ class OfflineBroadcast {
       initialBackoff: initialBackoff,
       maxBackoff: maxBackoff,
       perAttemptTimeout: perAttemptTimeout,
+      onlineSignal: onlineSignal,
       random: random,
       now: now,
     );
   }
 
   /// Convenience constructor wired to an [Ndk] instance.
+  ///
+  /// Derives an `onlineSignal` from `ndk.connectivity.relayConnectivityChanges`:
+  /// the shim is considered "online" when at least one connected relay sits on
+  /// a public-internet host (loopback, private IPv4/IPv6, and `.local` names
+  /// are filtered out, so a connected dev relay on localhost will not mask a
+  /// real outage).
   factory OfflineBroadcast.withNdk(
     Ndk ndk, {
     required Database db,
@@ -91,6 +111,13 @@ class OfflineBroadcast {
     Duration maxBackoff = const Duration(minutes: 30),
     Duration perAttemptTimeout = const Duration(seconds: 10),
   }) {
+    final onlineSignal = ndk.connectivity.relayConnectivityChanges
+        .map(
+          (relays) => relays.values.any(
+            (rc) => rc.isConnected && isPublicRelayHost(rc.url),
+          ),
+        )
+        .distinct();
     return OfflineBroadcast(
       broadcastFn: (event, relays) =>
           ndk.broadcast.broadcast(nostrEvent: event, specificRelays: relays),
@@ -100,6 +127,7 @@ class OfflineBroadcast {
       initialBackoff: initialBackoff,
       maxBackoff: maxBackoff,
       perAttemptTimeout: perAttemptTimeout,
+      onlineSignal: onlineSignal,
     );
   }
 
@@ -220,26 +248,52 @@ class OfflineBroadcast {
   Future<List<QueuedBroadcast>> listAll() => _store.findAll();
 
   /// Starts the periodic retry timer and replays anything already due.
-  /// Idempotent: calling it more than once is a no-op.
+  /// Also subscribes to `onlineSignal` if one was provided. Idempotent:
+  /// calling it more than once is a no-op.
   void start() {
     _ensureNotDisposed();
-    _tickTimer ??= Timer.periodic(_tickInterval, (_) => _tick());
-    // Replay anything already due (e.g. after a process restart).
-    unawaited(_tick());
+    if (_tickTimer != null) return;
+    _tickTimer = Timer.periodic(_tickInterval, (_) => _periodicTick());
+    if (_onlineSignal != null && _onlineSub == null) {
+      _onlineSub = _onlineSignal.listen(_handleOnlineChange);
+    }
+    // Replay anything already due (e.g. after a process restart), respecting
+    // the current online state. If a signal is configured and hasn't emitted
+    // yet, [_isOnline] defaults to true so behavior matches the no-signal
+    // case until the first event arrives.
+    _periodicTick();
   }
 
-  /// Stops the retry timer and waits for any in-flight attempt to finish so
-  /// the caller can safely close the underlying sembast database.
+  /// Stops the retry timer, cancels the connectivity subscription, and waits
+  /// for any in-flight attempt to finish so the caller can safely close the
+  /// underlying sembast database.
   Future<void> dispose() async {
     if (_disposed) return;
     _disposed = true;
     _tickTimer?.cancel();
     _tickTimer = null;
-    // Wait for any in-flight attempts to finish so callers can safely close
-    // the underlying sembast database after dispose() returns.
+    await _onlineSub?.cancel();
+    _onlineSub = null;
     if (_inFlight.isNotEmpty) {
       await Future.wait(_inFlight.values);
     }
+  }
+
+  void _handleOnlineChange(bool online) {
+    if (_disposed) return;
+    final wasOnline = _isOnline;
+    _isOnline = online;
+    if (!wasOnline && online) {
+      // Edge: offline -> online. Replay due entries right away rather than
+      // waiting for the next periodic tick.
+      unawaited(_tick());
+    }
+  }
+
+  void _periodicTick() {
+    if (_disposed) return;
+    if (!_isOnline) return;
+    unawaited(_tick());
   }
 
   // ---------------------------------------------------------------------------

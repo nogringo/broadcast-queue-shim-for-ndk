@@ -3,7 +3,7 @@ description: >-
   Offline-first wrapper around the ndk package's broadcast use case. Persists
   Nostr events to a local sembast queue and retries until every targeted relay
   has acknowledged delivery.
-version: 0.1.0
+version: 0.2.0
 repository: https://github.com/nogringo/broadcast_queue_shim_for_ndk
 issue_tracker: https://github.com/nogringo/broadcast_queue_shim_for_ndk/issues
 
