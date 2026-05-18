@@ -1,39 +1,183 @@
-<!-- 
-This README describes the package. If you publish this package to pub.dev,
-this README's contents appear on the landing page for your package.
+# broadcast_queue_shim_for_ndk
 
-For information about how to write a good package README, see the guide for
-[writing package pages](https://dart.dev/tools/pub/writing-package-pages). 
+Offline-first wrapper around the [`ndk`](https://pub.dev/packages/ndk) package's
+broadcast use case.
 
-For general information about developing packages, see the Dart guide for
-[creating packages](https://dart.dev/guides/libraries/create-packages)
-and the Flutter guide for
-[developing packages and plugins](https://flutter.dev/to/develop-packages). 
--->
+NDK's `broadcast` sends a Nostr event to a set of relays and reports per-relay
+results. If every relay is unreachable (flaky network, app backgrounded,
+process killed), the event is gone from the caller's perspective. This shim
+sits in front of `ndk.broadcast` and adds:
 
-TODO: Put a short description of the package here that helps potential users
-know whether this package might be useful for them.
+- **Local persistence first.** The event is committed to a sembast store
+  before any network attempt. `broadcast()` returns once persistence is durable;
+  delivery happens in the background and survives restarts.
+- **100 % delivery guarantee.** An entry is only marked `delivered` once
+  *every* targeted relay has returned `broadcastSuccessful: true`. Partial
+  success keeps the entry pending and retries the missing relays.
+- **Monotonic ack history.** A relay that has acked never un-acks. A delivered
+  entry never silently flips back to pending due to a transient relay outage.
+- **No auto-deletion.** Delivered entries stay in the store and can be
+  re-broadcast later, for instance to a freshly discovered relay.
 
-## Features
+## Install
 
-TODO: List what your package can do. Maybe include images, gifs, or videos.
-
-## Getting started
-
-TODO: List prerequisites and provide or point to information on how to
-start using the package.
-
-## Usage
-
-TODO: Include short and useful examples for package users. Add longer examples
-to `/example` folder. 
-
-```dart
-const like = 'sample';
+```yaml
+dependencies:
+  broadcast_queue_shim_for_ndk: ^0.1.0
+  ndk: ^0.8.3
+  sembast: ^3.8.7
 ```
 
-## Additional information
+## Quick start
 
-TODO: Tell users more about the package: where to find more information, how to 
-contribute to the package, how to file issues, what response they can expect 
-from the package authors, and more.
+```dart
+import 'package:broadcast_queue_shim_for_ndk/broadcast_queue_shim_for_ndk.dart';
+import 'package:ndk/ndk.dart';
+import 'package:sembast/sembast_io.dart';
+
+Future<void> main() async {
+  final db = await databaseFactoryIo.openDatabase('broadcasts.db');
+
+  final ndk = Ndk(
+    NdkConfig(
+      eventVerifier: Bip340EventVerifier(),
+      cache: MemCacheManager(),
+    ),
+  );
+
+  final outbox = OfflineBroadcast.withNdk(ndk, db: db);
+  outbox.start();
+
+  final event = Nip01Event(
+    pubKey: myPubKey,
+    kind: 1,
+    tags: const [],
+    content: 'hello from a flaky network',
+  );
+
+  // Returns as soon as the event is persisted. Delivery is now the shim's
+  // responsibility.
+  await outbox.broadcast(
+    event,
+    relays: const ['wss://relay.damus.io', 'wss://nos.lol'],
+  );
+}
+```
+
+## Semantics
+
+### `broadcast(event, relays: [...])`
+
+Persists `event` and schedules an immediate attempt to push it to every URL in
+`relays`. The list is **required**: gossip-based relay selection is never
+used. URLs are normalized (lowercased, trailing `/` stripped) before storage.
+
+If a record with the same `event.id` already exists, the relay lists are
+merged. `deliveredAt` is preserved if every relay in the merged list is
+already in the entry's ack set; otherwise the entry is demoted to pending so
+the missing relays get pushed.
+
+### `retryNow()`
+
+Forces an immediate scan of due entries. Wire this to your connectivity
+signal (e.g. `connectivity_plus`) so the shim retries the moment the device
+comes back online rather than waiting for the next periodic tick.
+
+### `rebroadcast(id, {String? relay})`
+
+`ackedRelays` and `deliveredAt` are monotonic. `rebroadcast` never rewrites
+the past; it queues a one-shot push via a transient `forcedRelays` override
+that the next attempt consumes.
+
+- `rebroadcast(id)`: schedules an immediate push to **every** relay in the
+  entry's `relays` list, including those that already acked. Useful when you
+  suspect a relay dropped your event. Acks and `deliveredAt` are preserved
+  regardless of the new attempt's outcome.
+- `rebroadcast(id, relay: r)`: pushes to that single relay. If `r` is new
+  to the entry, it joins the target list and the entry is demoted to pending
+  until `r` acks. If `r` was already there, the historical state is
+  preserved.
+
+### What "success" means
+
+The full target set must ack. NDK's own `considerDonePercent` knob is *not*
+used as a delivery threshold; it only governs when the underlying future
+completes, which is a different question.
+
+### What the shim does NOT do
+
+- **It never signs.** Whatever event you pass is forwarded as-is to
+  `ndk.broadcast.broadcast`. If the event is unsigned, NDK signs it using its
+  configured `EventSigner`. The shim has no opinion on signing.
+- **It never deletes records.** Even after full delivery, the entry stays in
+  the database. If you want retention, prune it yourself by clearing records
+  from sembast directly.
+- **It does not give up.** Without a `maxAttempts` knob, a deterministically
+  rejected event (POW too low, kind not allowed by a relay, etc.) will retry
+  forever with exponential backoff. Inspect `QueuedBroadcast.lastErrors` and
+  manually remove if needed.
+
+## Tuning
+
+```dart
+OfflineBroadcast.withNdk(
+  ndk,
+  db: db,
+  storeName: 'broadcasts',                       // sembast store name
+  tickInterval: const Duration(seconds: 30),     // periodic retry scan
+  initialBackoff: const Duration(seconds: 5),    // backoff floor
+  maxBackoff: const Duration(minutes: 30),       // backoff ceiling
+  perAttemptTimeout: const Duration(seconds: 10),// gives up on a single NDK call after this
+);
+```
+
+## Architecture in one diagram
+
+```
+caller.broadcast(event, relays)
+        │
+        ▼
+  sembast write ──── durable, returns to caller here
+        │
+        ▼
+  ndk.broadcast.broadcast(event, specificRelays: remaining)
+        │
+        ▼
+  await broadcastDoneFuture
+        │
+        ▼
+  per-relay union into ackedRelays  ────►  delivered when ⊇ relays
+  per-relay error into lastErrors          (otherwise schedule backoff)
+```
+
+A `Timer.periodic` scans `findDue` every `tickInterval` and replays whatever
+is overdue. `retryNow()` runs the same scan immediately.
+
+## Testing your integration
+
+`OfflineBroadcast` is fully unit-testable without NDK. Pass a custom
+`BroadcastFn` to the default constructor:
+
+```dart
+final outbox = OfflineBroadcast(
+  broadcastFn: (event, relays) => NdkBroadcastResponse(
+    publishEvent: event,
+    broadcastDoneStream: Stream.value([
+      for (final r in relays)
+        RelayBroadcastResponse(
+          relayUrl: r,
+          okReceived: true,
+          broadcastSuccessful: true,
+        ),
+    ]),
+  ),
+  db: await newDatabaseFactoryMemory().openDatabase('test.db'),
+);
+```
+
+The package's own test suite uses exactly this approach; see
+[`test/offline_broadcast_test.dart`](https://github.com/nogringo/broadcast_queue_shim_for_ndk/blob/main/test/offline_broadcast_test.dart).
+
+## License
+
+MIT

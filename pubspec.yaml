@@ -1,15 +1,24 @@
 name: broadcast_queue_shim_for_ndk
-description: A starting point for Dart libraries or applications.
-version: 1.0.0
-# repository: https://github.com/my_org/my_repo
+description: >-
+  Offline-first wrapper around the ndk package's broadcast use case. Persists
+  Nostr events to a local sembast queue and retries until every targeted relay
+  has acknowledged delivery.
+version: 0.1.0
+repository: https://github.com/nogringo/broadcast_queue_shim_for_ndk
+issue_tracker: https://github.com/nogringo/broadcast_queue_shim_for_ndk/issues
+
+topics:
+  - nostr
+  - ndk
+  - offline-first
+  - queue
 
 environment:
   sdk: ^3.11.5
 
-# Add regular dependencies here.
 dependencies:
   ndk: ^0.8.3
-  # path: ^1.9.0
+  sembast: ^3.8.7
 
 dev_dependencies:
   lints: ^6.0.0

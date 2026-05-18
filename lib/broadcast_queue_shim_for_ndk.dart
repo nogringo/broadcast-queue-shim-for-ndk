@@ -1,8 +1,10 @@
-/// Support for doing something awesome.
+/// Offline-first shim around the [ndk](https://pub.dev/packages/ndk) package's
+/// broadcast use case.
 ///
-/// More dartdocs go here.
+/// Use [OfflineBroadcast.withNdk] to wrap an existing `Ndk` instance, persist
+/// outgoing events in a sembast database, and retry until every targeted
+/// relay has acknowledged each event.
 library;
 
-export 'src/broadcast_queue_shim_for_ndk_base.dart';
-
-// TODO: Export any libraries intended for clients of this package.
+export 'src/offline_broadcast.dart' show BroadcastFn, OfflineBroadcast;
+export 'src/queued_broadcast.dart' show BroadcastStatus, QueuedBroadcast;
