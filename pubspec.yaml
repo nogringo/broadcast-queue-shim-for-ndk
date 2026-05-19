@@ -4,8 +4,8 @@ description: >-
   Nostr events to a local sembast queue and retries until every targeted relay
   has acknowledged delivery.
 version: 0.2.0
-repository: https://github.com/nogringo/broadcast_queue_shim_for_ndk
-issue_tracker: https://github.com/nogringo/broadcast_queue_shim_for_ndk/issues
+repository: https://github.com/nogringo/broadcast-queue-shim-for-ndk
+issue_tracker: https://github.com/nogringo/broadcast-queue-shim-for-ndk/issues
 
 topics:
   - nostr

@@ -198,7 +198,7 @@ final outbox = OfflineBroadcast(
 ```
 
 The package's own test suite uses exactly this approach; see
-[`test/offline_broadcast_test.dart`](https://github.com/nogringo/broadcast_queue_shim_for_ndk/blob/main/test/offline_broadcast_test.dart).
+[`test/offline_broadcast_test.dart`](https://github.com/nogringo/broadcast-queue-shim-for-ndk/blob/main/test/offline_broadcast_test.dart).
 
 ## License
 
