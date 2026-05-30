@@ -15,6 +15,18 @@ void main() {
       );
     });
 
+    test('does not overflow for very large attempt counts', () {
+      // On native platforms int is 64-bit; 5000 * 2^51 overflows.
+      final d = computeBackoff(
+        attempts: 100,
+        initial: const Duration(seconds: 5),
+        max: const Duration(minutes: 30),
+        random: Random(1),
+      );
+      expect(d.inMilliseconds, greaterThanOrEqualTo(5000));
+      expect(d.inMilliseconds, lessThanOrEqualTo(30 * 60 * 1000));
+    });
+
     test('result is bounded by [initial, max]', () {
       final rng = Random(42);
       for (var i = 1; i < 20; i++) {

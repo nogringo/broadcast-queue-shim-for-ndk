@@ -12,7 +12,7 @@ Duration computeBackoff({
 }) {
   if (attempts <= 0) return initial;
   final r = random ?? Random();
-  final exp = initial.inMilliseconds * pow(2, attempts - 1);
+  final exp = initial.inMilliseconds.toDouble() * pow(2.0, attempts - 1);
   final capped = min(exp, max.inMilliseconds.toDouble());
   final jittered = r.nextDouble() * capped;
   final ms = jittered.clamp(initial.inMilliseconds.toDouble(), capped).toInt();

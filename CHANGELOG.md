@@ -1,3 +1,11 @@
+## 0.2.1
+
+- Fix `int64` overflow in `computeBackoff` on native platforms (Android, iOS,
+  Linux, macOS, Windows). After ~52 failed attempts (with the default 5s
+  initial delay), `pow(2, attempts)` wrapped to a negative integer, causing
+  `double.clamp` to throw `Invalid argument(s)`. The calculation now uses
+  double arithmetic (`pow(2.0, ...)`) to avoid the overflow.
+
 ## 0.2.0
 
 - Connectivity-aware periodic retries. `OfflineBroadcast.withNdk()` now
