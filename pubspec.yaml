@@ -17,7 +17,7 @@ environment:
   sdk: ^3.11.5
 
 dependencies:
-  ndk: ^0.8.3
+  ndk: ^0.8.4-dev.1
   sembast: ^3.8.7
 
 dev_dependencies:
