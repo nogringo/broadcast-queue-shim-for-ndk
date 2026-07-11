@@ -41,6 +41,10 @@ class QueuedBroadcast {
   /// retried automatically for this event.
   final Map<String, String> terminalErrors;
 
+  /// Consecutive online attempts where a relay was unreachable. Reset when the
+  /// relay responds or a forced rebroadcast later succeeds.
+  final Map<String, int> inaccessibleAttempts;
+
   /// Number of delivery attempts that have completed (success or failure)
   /// since the record was created.
   final int attempts;
@@ -87,6 +91,7 @@ class QueuedBroadcast {
     required this.ackedRelays,
     required this.lastErrors,
     required this.terminalErrors,
+    required this.inaccessibleAttempts,
     required this.attempts,
     required this.firstAttemptAt,
     required this.lastAttemptAt,
@@ -123,6 +128,7 @@ class QueuedBroadcast {
     List<String>? ackedRelays,
     Map<String, String>? lastErrors,
     Map<String, String>? terminalErrors,
+    Map<String, int>? inaccessibleAttempts,
     int? attempts,
     int? firstAttemptAt,
     int? lastAttemptAt,
@@ -141,6 +147,7 @@ class QueuedBroadcast {
       ackedRelays: ackedRelays ?? this.ackedRelays,
       lastErrors: lastErrors ?? this.lastErrors,
       terminalErrors: terminalErrors ?? this.terminalErrors,
+      inaccessibleAttempts: inaccessibleAttempts ?? this.inaccessibleAttempts,
       attempts: attempts ?? this.attempts,
       firstAttemptAt: firstAttemptAt ?? this.firstAttemptAt,
       lastAttemptAt: lastAttemptAt ?? this.lastAttemptAt,
@@ -163,6 +170,7 @@ class QueuedBroadcast {
       'ackedRelays': ackedRelays,
       'lastErrors': lastErrors,
       'terminalErrors': terminalErrors,
+      'inaccessibleAttempts': inaccessibleAttempts,
       'attempts': attempts,
       'firstAttemptAt': firstAttemptAt,
       'lastAttemptAt': lastAttemptAt,
@@ -187,6 +195,8 @@ class QueuedBroadcast {
       terminalErrors: ((map['terminalErrors'] as Map?) ?? const {}).map(
         (k, v) => MapEntry(k as String, v as String),
       ),
+      inaccessibleAttempts: ((map['inaccessibleAttempts'] as Map?) ?? const {})
+          .map((k, v) => MapEntry(k as String, v as int)),
       attempts: map['attempts'] as int,
       firstAttemptAt: map['firstAttemptAt'] as int?,
       lastAttemptAt: map['lastAttemptAt'] as int?,

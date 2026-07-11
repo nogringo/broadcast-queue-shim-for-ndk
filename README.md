@@ -19,6 +19,8 @@ sits in front of `ndk.broadcast` and adds:
 - **Terminal relay rejections.** NIP-01 `OK false` replies with `pow`,
   `blocked`, `invalid`, `restricted`, or `error` stop retries for that
   relay/event pair and are exposed through `BroadcastStatus.failed`.
+- **Dead relay cutoff.** A relay that stays inaccessible for 12 consecutive
+  online attempts is also stopped for that event.
 - **No auto-deletion.** Delivered entries stay in the store and can be
   re-broadcast later, for instance to a freshly discovered relay.
 
@@ -145,8 +147,10 @@ retrying that relay for the event:
 If every target relay is either acked or terminally rejected, and at least one
 relay is terminally rejected, the entry status becomes `BroadcastStatus.failed`
 and it leaves `watchPending()`. Non-terminal failures, including
-`rate-limited`, unknown prefixes, missing colons, timeouts, no response, and
-transport errors, remain retryable.
+`rate-limited`, unknown prefixes, missing colons, and global broadcaster
+exceptions remain retryable. Timeouts, no response, and transport-level relay
+failures remain retryable until the relay has been inaccessible for 12
+consecutive online attempts.
 
 Manual `rebroadcast(...)` can still force another push. If a previously
 terminally rejected relay later succeeds, its terminal error is cleared and the
@@ -161,8 +165,8 @@ entry can become `delivered`.
   the database. If you want retention, prune it yourself by clearing records
   from sembast directly.
 - **It does not apply a max-attempts limit.** Retryable failures continue with
-  exponential backoff until they ack, are manually rebroadcast, or become a
-  terminal NIP-01 rejection.
+  exponential backoff until they ack, are manually rebroadcast, become a
+  terminal NIP-01 rejection, or hit the inaccessible-relay cutoff.
 
 ## Tuning
 
@@ -175,6 +179,7 @@ OfflineBroadcast.withNdk(
   initialBackoff: const Duration(seconds: 5),    // backoff floor
   maxBackoff: const Duration(minutes: 30),       // backoff ceiling
   perAttemptTimeout: const Duration(seconds: 10),// gives up on a single NDK call after this
+  maxInaccessibleAttemptsPerRelay: 12,           // stops dead relays while online
 );
 ```
 
@@ -195,6 +200,7 @@ caller.broadcast(event, relays)
         ▼
   per-relay union into ackedRelays       ────►  delivered when ⊇ relays
   terminal OK false into terminalErrors  ────►  failed when all remaining are terminal
+  inaccessible relay attempts            ────►  terminal after 12 online failures
   retryable error into lastErrors              (otherwise schedule backoff)
 ```
 

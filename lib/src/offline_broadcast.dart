@@ -31,6 +31,7 @@ class OfflineBroadcast {
   final Duration _initialBackoff;
   final Duration _maxBackoff;
   final Duration _perAttemptTimeout;
+  final int _maxInaccessibleAttemptsPerRelay;
   final Random _random;
   final int Function() _now;
   final Stream<bool>? _onlineSignal;
@@ -49,6 +50,7 @@ class OfflineBroadcast {
     required Duration initialBackoff,
     required Duration maxBackoff,
     required Duration perAttemptTimeout,
+    required int maxInaccessibleAttemptsPerRelay,
     Stream<bool>? onlineSignal,
     Random? random,
     int Function()? now,
@@ -58,6 +60,7 @@ class OfflineBroadcast {
        _initialBackoff = initialBackoff,
        _maxBackoff = maxBackoff,
        _perAttemptTimeout = perAttemptTimeout,
+       _maxInaccessibleAttemptsPerRelay = maxInaccessibleAttemptsPerRelay,
        _onlineSignal = onlineSignal,
        _random = random ?? Random(),
        _now = now ?? (() => DateTime.now().millisecondsSinceEpoch);
@@ -70,6 +73,12 @@ class OfflineBroadcast {
   /// `false -> true` edge triggers an immediate retry pass. `retryNow()`
   /// always runs regardless of this signal. If [onlineSignal] is null the
   /// shim assumes it is always online.
+  ///
+  /// [maxInaccessibleAttemptsPerRelay] caps consecutive online attempts where
+  /// a relay is unreachable for one event. Once reached, that relay is treated
+  /// as terminally failed for the event. Attempts while [onlineSignal] is
+  /// `false`, global broadcaster exceptions, and relay-level OK responses do
+  /// not increment this counter.
   factory OfflineBroadcast({
     required BroadcastFn broadcastFn,
     required Database db,
@@ -78,10 +87,18 @@ class OfflineBroadcast {
     Duration initialBackoff = const Duration(seconds: 5),
     Duration maxBackoff = const Duration(minutes: 30),
     Duration perAttemptTimeout = const Duration(seconds: 10),
+    int maxInaccessibleAttemptsPerRelay = 12,
     Stream<bool>? onlineSignal,
     Random? random,
     int Function()? now,
   }) {
+    if (maxInaccessibleAttemptsPerRelay <= 0) {
+      throw ArgumentError.value(
+        maxInaccessibleAttemptsPerRelay,
+        'maxInaccessibleAttemptsPerRelay',
+        'must be greater than zero',
+      );
+    }
     return OfflineBroadcast._(
       broadcastFn: broadcastFn,
       db: db,
@@ -90,6 +107,7 @@ class OfflineBroadcast {
       initialBackoff: initialBackoff,
       maxBackoff: maxBackoff,
       perAttemptTimeout: perAttemptTimeout,
+      maxInaccessibleAttemptsPerRelay: maxInaccessibleAttemptsPerRelay,
       onlineSignal: onlineSignal,
       random: random,
       now: now,
@@ -103,6 +121,9 @@ class OfflineBroadcast {
   /// a public-internet host (loopback, private IPv4/IPv6, and `.local` names
   /// are filtered out, so a connected dev relay on localhost will not mask a
   /// real outage).
+  ///
+  /// [maxInaccessibleAttemptsPerRelay] has the same meaning as on the default
+  /// constructor.
   factory OfflineBroadcast.withNdk(
     Ndk ndk, {
     required Database db,
@@ -111,6 +132,7 @@ class OfflineBroadcast {
     Duration initialBackoff = const Duration(seconds: 5),
     Duration maxBackoff = const Duration(minutes: 30),
     Duration perAttemptTimeout = const Duration(seconds: 10),
+    int maxInaccessibleAttemptsPerRelay = 12,
   }) {
     final onlineSignal = ndk.connectivity.relayConnectivityChanges
         .map(
@@ -128,6 +150,7 @@ class OfflineBroadcast {
       initialBackoff: initialBackoff,
       maxBackoff: maxBackoff,
       perAttemptTimeout: perAttemptTimeout,
+      maxInaccessibleAttemptsPerRelay: maxInaccessibleAttemptsPerRelay,
       onlineSignal: onlineSignal,
     );
   }
@@ -179,6 +202,7 @@ class OfflineBroadcast {
         ackedRelays: const [],
         lastErrors: const {},
         terminalErrors: const {},
+        inaccessibleAttempts: const {},
         attempts: 0,
         firstAttemptAt: null,
         lastAttemptAt: null,
@@ -361,6 +385,7 @@ class OfflineBroadcast {
       }
 
       final attemptStart = _now();
+      final countInaccessibleAttempts = _isOnline;
       List<RelayBroadcastResponse> results;
       String? syncError;
       try {
@@ -380,6 +405,9 @@ class OfflineBroadcast {
         final newTerminalErrors = Map<String, String>.from(
           current.terminalErrors,
         );
+        final newInaccessibleAttempts = Map<String, int>.from(
+          current.inaccessibleAttempts,
+        );
 
         final byUrl = <String, RelayBroadcastResponse>{};
         for (final r in results) {
@@ -394,11 +422,13 @@ class OfflineBroadcast {
             newAcked.add(relay);
             newErrors.remove(relay);
             newTerminalErrors.remove(relay);
+            newInaccessibleAttempts.remove(relay);
           } else if (r != null && _isTerminalOkFalse(r)) {
             if (!alreadyAcked) {
               final msg = r.msg.isEmpty ? 'rejected' : r.msg;
               newTerminalErrors[relay] = msg;
               newErrors.remove(relay);
+              newInaccessibleAttempts.remove(relay);
             }
           } else if (!alreadyAcked && !alreadyTerminal) {
             // Acks are monotonic: a transient failure does not invalidate
@@ -407,12 +437,27 @@ class OfflineBroadcast {
             final msg = r == null
                 ? (syncError ?? 'no response (timeout or relay unreachable)')
                 : (r.msg.isEmpty ? 'rejected' : r.msg);
-            newErrors[relay] = msg;
+            if (countInaccessibleAttempts &&
+                _isRelayInaccessible(r, syncError)) {
+              final count = (newInaccessibleAttempts[relay] ?? 0) + 1;
+              if (count >= _maxInaccessibleAttemptsPerRelay) {
+                newTerminalErrors[relay] = 'max-inaccessible-attempts: $msg';
+                newErrors.remove(relay);
+                newInaccessibleAttempts[relay] = count;
+              } else {
+                newInaccessibleAttempts[relay] = count;
+                newErrors[relay] = msg;
+              }
+            } else {
+              newInaccessibleAttempts.remove(relay);
+              newErrors[relay] = msg;
+            }
           }
         }
         for (final ok in newAcked) {
           newErrors.remove(ok);
           newTerminalErrors.remove(ok);
+          newInaccessibleAttempts.remove(ok);
         }
         for (final terminal in newTerminalErrors.keys) {
           newErrors.remove(terminal);
@@ -437,6 +482,7 @@ class OfflineBroadcast {
           ackedRelays: newAcked.toList(growable: false),
           lastErrors: newErrors,
           terminalErrors: newTerminalErrors,
+          inaccessibleAttempts: newInaccessibleAttempts,
           attempts: attempts,
           firstAttemptAt: current.firstAttemptAt ?? attemptStart,
           lastAttemptAt: attemptStart,
@@ -490,6 +536,14 @@ class OfflineBroadcast {
     if (prefixEnd <= 0) return false;
     final prefix = response.msg.substring(0, prefixEnd).trim().toLowerCase();
     return _terminalOkFalsePrefixes.contains(prefix);
+  }
+
+  bool _isRelayInaccessible(
+    RelayBroadcastResponse? response,
+    String? syncError,
+  ) {
+    if (response == null) return syncError == null;
+    return !response.okReceived;
   }
 
   _AttemptTerminalState _terminalState(

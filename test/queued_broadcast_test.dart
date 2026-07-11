@@ -15,6 +15,7 @@ void main() {
         ackedRelays: const ['wss://b'],
         lastErrors: const {},
         terminalErrors: const {'wss://c': 'pow: too low'},
+        inaccessibleAttempts: const {},
         attempts: 0,
         firstAttemptAt: null,
         lastAttemptAt: null,
@@ -34,6 +35,7 @@ void main() {
         ackedRelays: const ['wss://a'],
         lastErrors: const {},
         terminalErrors: const {},
+        inaccessibleAttempts: const {},
         attempts: 1,
         firstAttemptAt: 0,
         lastAttemptAt: 0,
@@ -56,6 +58,7 @@ void main() {
         ackedRelays: const [],
         lastErrors: const {'wss://relay.example': 'timeout'},
         terminalErrors: const {'wss://other.example': 'blocked: banned'},
+        inaccessibleAttempts: const {'wss://relay.example': 2},
         attempts: 2,
         firstAttemptAt: 100,
         lastAttemptAt: 200,
@@ -70,6 +73,7 @@ void main() {
       expect(restored.relays, original.relays);
       expect(restored.lastErrors, original.lastErrors);
       expect(restored.terminalErrors, original.terminalErrors);
+      expect(restored.inaccessibleAttempts, original.inaccessibleAttempts);
       expect(restored.attempts, original.attempts);
       expect(restored.failedAt, original.failedAt);
     });
@@ -91,6 +95,7 @@ void main() {
         'forcedRelays': null,
       });
       expect(restored.terminalErrors, isEmpty);
+      expect(restored.inaccessibleAttempts, isEmpty);
       expect(restored.failedAt, isNull);
     });
   });

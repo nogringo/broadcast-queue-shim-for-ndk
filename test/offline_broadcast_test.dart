@@ -304,6 +304,119 @@ void main() {
   );
 
   test(
+    'inaccessible relay becomes terminal after online attempt threshold',
+    () async {
+      final fake = FakeBroadcaster();
+      final outbox = OfflineBroadcast(
+        broadcastFn: fake.fn,
+        db: db,
+        initialBackoff: const Duration(milliseconds: 1),
+        maxInaccessibleAttemptsPerRelay: 2,
+      );
+
+      final event = _event();
+      await outbox.broadcast(event, relays: const ['wss://gone']);
+
+      final pending = await _waitFor(outbox, event.id, (r) => r.attempts >= 1);
+      expect(pending.status, BroadcastStatus.pending);
+      expect(pending.inaccessibleAttempts, {'wss://gone': 1});
+      expect(pending.remainingRelays, ['wss://gone']);
+
+      await Future.delayed(const Duration(milliseconds: 5));
+      await outbox.retryNow();
+      final failed = await _waitFor(
+        outbox,
+        event.id,
+        (r) => r.status == BroadcastStatus.failed,
+      );
+      expect(failed.remainingRelays, isEmpty);
+      expect(failed.inaccessibleAttempts, {'wss://gone': 2});
+      expect(
+        failed.terminalErrors['wss://gone'],
+        'max-inaccessible-attempts: no response (timeout or relay unreachable)',
+      );
+
+      await outbox.retryNow();
+      expect(fake.calls.length, 2);
+
+      await outbox.dispose();
+    },
+  );
+
+  test(
+    'offline inaccessible attempts do not count toward terminal failure',
+    () async {
+      final online = StreamController<bool>();
+      final fake = FakeBroadcaster();
+      final outbox = OfflineBroadcast(
+        broadcastFn: fake.fn,
+        db: db,
+        initialBackoff: const Duration(milliseconds: 1),
+        maxInaccessibleAttemptsPerRelay: 1,
+        onlineSignal: online.stream,
+      );
+      outbox.start();
+      online.add(false);
+      await Future.delayed(const Duration(milliseconds: 5));
+
+      final event = _event();
+      await outbox.broadcast(event, relays: const ['wss://gone']);
+
+      final pending = await _waitFor(outbox, event.id, (r) => r.attempts >= 1);
+      expect(pending.status, BroadcastStatus.pending);
+      expect(pending.inaccessibleAttempts, isEmpty);
+      expect(pending.terminalErrors, isEmpty);
+
+      await online.close();
+      await outbox.dispose();
+    },
+  );
+
+  test(
+    'global broadcaster exceptions do not count as relay inaccessible',
+    () async {
+      final fake = FakeBroadcaster()..syncError = StateError('no signer');
+      final outbox = OfflineBroadcast(
+        broadcastFn: fake.fn,
+        db: db,
+        initialBackoff: const Duration(milliseconds: 1),
+        maxInaccessibleAttemptsPerRelay: 1,
+      );
+
+      final event = _event();
+      await outbox.broadcast(event, relays: const ['wss://a']);
+      final pending = await _waitFor(outbox, event.id, (r) => r.attempts >= 1);
+      expect(pending.status, BroadcastStatus.pending);
+      expect(pending.inaccessibleAttempts, isEmpty);
+      expect(pending.terminalErrors, isEmpty);
+      expect(pending.lastErrors['wss://a'], contains('no signer'));
+
+      await outbox.dispose();
+    },
+  );
+
+  test('ok false relay responses do not count as inaccessible', () async {
+    final fake = FakeBroadcaster();
+    fake.rejectOkFalse('wss://rate', msg: 'rate-limited: slow down');
+    final outbox = OfflineBroadcast(
+      broadcastFn: fake.fn,
+      db: db,
+      initialBackoff: const Duration(milliseconds: 1),
+      maxInaccessibleAttemptsPerRelay: 1,
+    );
+
+    final event = _event();
+    await outbox.broadcast(event, relays: const ['wss://rate']);
+    final pending = await _waitFor(outbox, event.id, (r) => r.attempts >= 1);
+    expect(pending.status, BroadcastStatus.pending);
+    expect(pending.inaccessibleAttempts, isEmpty);
+    expect(pending.terminalErrors, isEmpty);
+    expect(pending.lastErrors['wss://rate'], 'rate-limited: slow down');
+
+    await outbox.dispose();
+  });
+
+  test(
     'mixed terminal and retryable failures only retry retryable relays',
     () async {
       final fake = FakeBroadcaster();

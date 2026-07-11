@@ -1,4 +1,4 @@
-## Unreleased
+## 0.3.0
 
 - Stop retrying a relay/event pair when the relay returns NIP-01 `OK false`
   with a terminal machine-readable prefix: `pow`, `blocked`, `invalid`,
@@ -8,6 +8,8 @@
   terminally rejected.
 - Keep retrying non-terminal failures such as `rate-limited`, unknown prefixes,
   timeouts, no response, and transport errors.
+- Stop retrying a relay/event pair after 12 consecutive online attempts where
+  the relay is inaccessible.
 
 ## 0.2.1
 
