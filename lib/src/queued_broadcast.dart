@@ -5,6 +5,10 @@ enum BroadcastStatus {
   /// At least one targeted relay has not acknowledged the event yet.
   pending,
 
+  /// Every relay has either acknowledged the event or rejected it with a
+  /// terminal NIP-01 OK prefix.
+  failed,
+
   /// Every relay in `relays` has acknowledged the event at least once.
   /// Monotonic: once a record reaches this state the shim never demotes it
   /// back to `pending` on its own.
@@ -33,6 +37,10 @@ class QueuedBroadcast {
   /// Last error message seen per relay still pending. Cleared on ack.
   final Map<String, String> lastErrors;
 
+  /// Terminal NIP-01 OK false messages per relay. These relays are no longer
+  /// retried automatically for this event.
+  final Map<String, String> terminalErrors;
+
   /// Number of delivery attempts that have completed (success or failure)
   /// since the record was created.
   final int attempts;
@@ -55,6 +63,11 @@ class QueuedBroadcast {
   /// new relay (or `broadcast()` merging in an unacked relay) clears it.
   final int? deliveredAt;
 
+  /// Wall-clock millis (since epoch) of the first time the entry became
+  /// terminally failed: all relays were either acked or terminally rejected,
+  /// with at least one terminal rejection.
+  final int? failedAt;
+
   /// Wall-clock millis (since epoch) when this record was first persisted.
   final int createdAt;
 
@@ -73,23 +86,31 @@ class QueuedBroadcast {
     required this.relays,
     required this.ackedRelays,
     required this.lastErrors,
+    required this.terminalErrors,
     required this.attempts,
     required this.firstAttemptAt,
     required this.lastAttemptAt,
     required this.nextAttemptAt,
     required this.deliveredAt,
+    required this.failedAt,
     required this.createdAt,
     this.forcedRelays,
   });
 
-  /// `pending` while any relay still owes an ack, otherwise `delivered`.
-  BroadcastStatus get status =>
-      deliveredAt != null ? BroadcastStatus.delivered : BroadcastStatus.pending;
+  /// `pending` while any relay is still retryable, otherwise terminal.
+  BroadcastStatus get status {
+    if (deliveredAt != null) return BroadcastStatus.delivered;
+    if (failedAt != null) return BroadcastStatus.failed;
+    return BroadcastStatus.pending;
+  }
 
-  /// Relays still owed an ack, i.e. [relays] minus [ackedRelays].
+  /// Relays still retryable, i.e. [relays] minus acks and terminal failures.
   List<String> get remainingRelays {
     final acked = ackedRelays.toSet();
-    return relays.where((r) => !acked.contains(r)).toList(growable: false);
+    final terminal = terminalErrors.keys.toSet();
+    return relays
+        .where((r) => !acked.contains(r) && !terminal.contains(r))
+        .toList(growable: false);
   }
 
   /// Returns a copy of this record with the given fields replaced.
@@ -101,13 +122,16 @@ class QueuedBroadcast {
     List<String>? relays,
     List<String>? ackedRelays,
     Map<String, String>? lastErrors,
+    Map<String, String>? terminalErrors,
     int? attempts,
     int? firstAttemptAt,
     int? lastAttemptAt,
     int? nextAttemptAt,
     int? deliveredAt,
+    int? failedAt,
     List<String>? forcedRelays,
     bool clearDelivered = false,
+    bool clearFailed = false,
     bool clearForcedRelays = false,
   }) {
     return QueuedBroadcast(
@@ -116,11 +140,13 @@ class QueuedBroadcast {
       relays: relays ?? this.relays,
       ackedRelays: ackedRelays ?? this.ackedRelays,
       lastErrors: lastErrors ?? this.lastErrors,
+      terminalErrors: terminalErrors ?? this.terminalErrors,
       attempts: attempts ?? this.attempts,
       firstAttemptAt: firstAttemptAt ?? this.firstAttemptAt,
       lastAttemptAt: lastAttemptAt ?? this.lastAttemptAt,
       nextAttemptAt: nextAttemptAt ?? this.nextAttemptAt,
       deliveredAt: clearDelivered ? null : (deliveredAt ?? this.deliveredAt),
+      failedAt: clearFailed ? null : (failedAt ?? this.failedAt),
       createdAt: createdAt,
       forcedRelays: clearForcedRelays
           ? null
@@ -136,11 +162,13 @@ class QueuedBroadcast {
       'relays': relays,
       'ackedRelays': ackedRelays,
       'lastErrors': lastErrors,
+      'terminalErrors': terminalErrors,
       'attempts': attempts,
       'firstAttemptAt': firstAttemptAt,
       'lastAttemptAt': lastAttemptAt,
       'nextAttemptAt': nextAttemptAt,
       'deliveredAt': deliveredAt,
+      'failedAt': failedAt,
       'createdAt': createdAt,
       'forcedRelays': forcedRelays,
     };
@@ -156,11 +184,15 @@ class QueuedBroadcast {
       lastErrors: (map['lastErrors'] as Map).map(
         (k, v) => MapEntry(k as String, v as String),
       ),
+      terminalErrors: ((map['terminalErrors'] as Map?) ?? const {}).map(
+        (k, v) => MapEntry(k as String, v as String),
+      ),
       attempts: map['attempts'] as int,
       firstAttemptAt: map['firstAttemptAt'] as int?,
       lastAttemptAt: map['lastAttemptAt'] as int?,
       nextAttemptAt: map['nextAttemptAt'] as int,
       deliveredAt: map['deliveredAt'] as int?,
+      failedAt: map['failedAt'] as int?,
       createdAt: map['createdAt'] as int,
       forcedRelays: (map['forcedRelays'] as List?)?.cast<String>(),
     );

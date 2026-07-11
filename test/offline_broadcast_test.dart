@@ -50,6 +50,15 @@ class FakeBroadcaster {
       msg: msg,
     );
   }
+
+  void rejectOkFalse(String relay, {required String msg}) {
+    responders[relay] = () => RelayBroadcastResponse(
+      relayUrl: relay,
+      okReceived: true,
+      broadcastSuccessful: false,
+      msg: msg,
+    );
+  }
 }
 
 Nip01Event _event({int seed = 1}) => Nip01Event(
@@ -137,6 +146,260 @@ void main() {
 
     await outbox.dispose();
   });
+
+  test(
+    'terminal OK false prefixes stop retrying and mark the entry failed',
+    () async {
+      const terminalMessages = {
+        'wss://blocked': 'blocked: you are banned',
+        'wss://error': 'error: relay refuses this event',
+        'wss://invalid': 'invalid: bad event',
+        'wss://pow': 'pow: difficulty 26 is less than 30',
+        'wss://restricted': 'restricted: kind not allowed',
+      };
+
+      for (final entry in terminalMessages.entries) {
+        final fake = FakeBroadcaster();
+        fake.rejectOkFalse(entry.key, msg: entry.value);
+        final outbox = OfflineBroadcast(
+          broadcastFn: fake.fn,
+          db: db,
+          initialBackoff: const Duration(milliseconds: 1),
+        );
+
+        final event = _event(seed: entry.key.hashCode);
+        await outbox.broadcast(event, relays: [entry.key]);
+
+        final failed = await _waitFor(
+          outbox,
+          event.id,
+          (r) => r.status == BroadcastStatus.failed,
+        );
+        expect(failed.ackedRelays, isEmpty);
+        expect(failed.remainingRelays, isEmpty);
+        expect(failed.lastErrors, isEmpty);
+        expect(failed.terminalErrors, {entry.key: entry.value});
+        expect(failed.failedAt, isNotNull);
+
+        await outbox.retryNow();
+        expect(fake.calls.length, 1);
+
+        await outbox.dispose();
+        await db.close();
+        db = await newDatabaseFactoryMemory().openDatabase('test.db');
+      }
+    },
+  );
+
+  test(
+    'terminal prefix parsing is case-insensitive and requires colon',
+    () async {
+      final fake = FakeBroadcaster();
+      fake.rejectOkFalse('wss://a', msg: 'PoW: too low');
+      fake.rejectOkFalse('wss://b', msg: 'pow too low');
+      final outbox = OfflineBroadcast(
+        broadcastFn: fake.fn,
+        db: db,
+        initialBackoff: const Duration(milliseconds: 1),
+      );
+
+      final event = _event();
+      await outbox.broadcast(event, relays: const ['wss://a', 'wss://b']);
+
+      final pending = await _waitFor(outbox, event.id, (r) => r.attempts >= 1);
+      expect(pending.status, BroadcastStatus.pending);
+      expect(pending.terminalErrors, {'wss://a': 'PoW: too low'});
+      expect(pending.lastErrors, {'wss://b': 'pow too low'});
+      expect(pending.remainingRelays, ['wss://b']);
+
+      fake.ackAll(['wss://b']);
+      await outbox.retryNow();
+      final failed = await _waitFor(
+        outbox,
+        event.id,
+        (r) => r.status == BroadcastStatus.failed,
+      );
+      expect(failed.ackedRelays, ['wss://b']);
+      expect(failed.terminalErrors.keys, ['wss://a']);
+      expect(fake.calls.last.relays, ['wss://b']);
+
+      await outbox.dispose();
+    },
+  );
+
+  test(
+    'retryable OK false prefixes and transport failures keep retrying',
+    () async {
+      final fake = FakeBroadcaster();
+      fake.rejectOkFalse('wss://rate', msg: 'rate-limited: slow down');
+      fake.rejectOkFalse('wss://unknown', msg: 'mystery: nope');
+      fake.rejectOkFalse('wss://empty', msg: '');
+      fake.fail('wss://transport', msg: 'pow: from transport path');
+      final outbox = OfflineBroadcast(
+        broadcastFn: fake.fn,
+        db: db,
+        initialBackoff: const Duration(milliseconds: 1),
+      );
+
+      final event = _event();
+      await outbox.broadcast(
+        event,
+        relays: const [
+          'wss://rate',
+          'wss://unknown',
+          'wss://empty',
+          'wss://no-response',
+          'wss://transport',
+        ],
+      );
+
+      final pending = await _waitFor(outbox, event.id, (r) => r.attempts >= 1);
+      expect(pending.status, BroadcastStatus.pending);
+      expect(pending.terminalErrors, isEmpty);
+      expect(
+        pending.remainingRelays,
+        unorderedEquals([
+          'wss://rate',
+          'wss://unknown',
+          'wss://empty',
+          'wss://no-response',
+          'wss://transport',
+        ]),
+      );
+      expect(pending.lastErrors['wss://rate'], 'rate-limited: slow down');
+      expect(pending.lastErrors['wss://unknown'], 'mystery: nope');
+      expect(pending.lastErrors['wss://empty'], 'rejected');
+      expect(
+        pending.lastErrors['wss://no-response'],
+        'no response (timeout or relay unreachable)',
+      );
+      expect(pending.lastErrors['wss://transport'], 'pow: from transport path');
+
+      fake.ackAll([
+        'wss://rate',
+        'wss://unknown',
+        'wss://empty',
+        'wss://no-response',
+        'wss://transport',
+      ]);
+      await outbox.retryNow();
+      await _waitFor(
+        outbox,
+        event.id,
+        (r) => r.status == BroadcastStatus.delivered,
+      );
+      expect(
+        fake.calls.last.relays,
+        unorderedEquals([
+          'wss://rate',
+          'wss://unknown',
+          'wss://empty',
+          'wss://no-response',
+          'wss://transport',
+        ]),
+      );
+
+      await outbox.dispose();
+    },
+  );
+
+  test(
+    'mixed terminal and retryable failures only retry retryable relays',
+    () async {
+      final fake = FakeBroadcaster();
+      fake.ackAll(['wss://a']);
+      fake.rejectOkFalse('wss://b', msg: 'restricted: kind not allowed');
+      fake.fail('wss://c', msg: 'temporary outage');
+      final outbox = OfflineBroadcast(
+        broadcastFn: fake.fn,
+        db: db,
+        initialBackoff: const Duration(milliseconds: 1),
+      );
+
+      final event = _event();
+      await outbox.broadcast(
+        event,
+        relays: const ['wss://a', 'wss://b', 'wss://c'],
+      );
+
+      final pending = await _waitFor(outbox, event.id, (r) => r.attempts >= 1);
+      expect(pending.status, BroadcastStatus.pending);
+      expect(pending.ackedRelays, ['wss://a']);
+      expect(pending.terminalErrors, {
+        'wss://b': 'restricted: kind not allowed',
+      });
+      expect(pending.remainingRelays, ['wss://c']);
+
+      fake.ackAll(['wss://c']);
+      await outbox.retryNow();
+      final failed = await _waitFor(
+        outbox,
+        event.id,
+        (r) => r.status == BroadcastStatus.failed,
+      );
+      expect(failed.ackedRelays, unorderedEquals(['wss://a', 'wss://c']));
+      expect(failed.terminalErrors.keys, ['wss://b']);
+      expect(fake.calls.last.relays, ['wss://c']);
+
+      await outbox.dispose();
+    },
+  );
+
+  test('watchPending excludes terminally failed entries', () async {
+    final fake = FakeBroadcaster();
+    fake.rejectOkFalse('wss://a', msg: 'invalid: malformed');
+    final outbox = OfflineBroadcast(
+      broadcastFn: fake.fn,
+      db: db,
+      initialBackoff: const Duration(milliseconds: 1),
+    );
+
+    final event = _event();
+    await outbox.broadcast(event, relays: const ['wss://a']);
+    await _waitFor(outbox, event.id, (r) => r.status == BroadcastStatus.failed);
+
+    final pending = await outbox.watchPending().first;
+    expect(pending, isEmpty);
+
+    await outbox.dispose();
+  });
+
+  test(
+    'forced rebroadcast can recover a terminal failure when relay later succeeds',
+    () async {
+      final fake = FakeBroadcaster();
+      fake.rejectOkFalse('wss://a', msg: 'pow: too low');
+      final outbox = OfflineBroadcast(
+        broadcastFn: fake.fn,
+        db: db,
+        initialBackoff: const Duration(milliseconds: 1),
+      );
+
+      final event = _event();
+      await outbox.broadcast(event, relays: const ['wss://a']);
+      final failed = await _waitFor(
+        outbox,
+        event.id,
+        (r) => r.status == BroadcastStatus.failed,
+      );
+      final failedAt = failed.failedAt;
+
+      fake.ackAll(['wss://a']);
+      await outbox.rebroadcast(event.id, relay: 'wss://a');
+      final delivered = await _waitFor(
+        outbox,
+        event.id,
+        (r) => r.status == BroadcastStatus.delivered,
+      );
+      expect(delivered.ackedRelays, ['wss://a']);
+      expect(delivered.terminalErrors, isEmpty);
+      expect(delivered.failedAt, isNull);
+      expect(delivered.deliveredAt, isNot(failedAt));
+      expect(fake.calls.last.relays, ['wss://a']);
+
+      await outbox.dispose();
+    },
+  );
 
   test('retryNow only targets remaining relays', () async {
     final fake = FakeBroadcaster();

@@ -42,7 +42,7 @@ class QueueStore {
   }
 
   /// Records eligible for an attempt right now: either still pending, or
-  /// delivered but carrying a [QueuedBroadcast.forcedRelays] override that
+  /// terminal but carrying a [QueuedBroadcast.forcedRelays] override that
   /// hasn't been consumed yet.
   Future<List<QueuedBroadcast>> findDue({required int now}) async {
     final finder = Finder(
@@ -50,7 +50,7 @@ class QueueStore {
         final m = record.value as Map;
         final nextAttemptAt = m['nextAttemptAt'] as int;
         if (nextAttemptAt > now) return false;
-        if (m['deliveredAt'] == null) return true;
+        if (m['deliveredAt'] == null && m['failedAt'] == null) return true;
         return m['forcedRelays'] != null;
       }),
       sortOrders: [SortOrder('nextAttemptAt')],
@@ -80,7 +80,12 @@ class QueueStore {
   }
 
   Stream<List<QueuedBroadcast>> watchPending() {
-    final finder = Finder(filter: Filter.equals('deliveredAt', null));
+    final finder = Finder(
+      filter: Filter.and([
+        Filter.equals('deliveredAt', null),
+        Filter.equals('failedAt', null),
+      ]),
+    );
     return _store
         .query(finder: finder)
         .onSnapshots(_db)

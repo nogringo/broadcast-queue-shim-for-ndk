@@ -20,9 +20,10 @@ typedef BroadcastFn =
 /// Contract:
 ///  - `broadcast(event, relays: [...])` persists the event before returning.
 ///  - Delivery is guaranteed in the eventual sense: the shim keeps retrying
-///    each `pending` entry until every relay in [relays] has acknowledged it.
-///  - Records are never auto-deleted. A delivered entry stays in the store
-///    for manual `rebroadcast` or inspection.
+///    each `pending` entry until every relay in [relays] has acknowledged it
+///    or returned a terminal NIP-01 rejection.
+///  - Records are never auto-deleted. A terminal entry stays in the store for
+///    manual `rebroadcast` or inspection.
 class OfflineBroadcast {
   final BroadcastFn _broadcastFn;
   final QueueStore _store;
@@ -156,13 +157,19 @@ class OfflineBroadcast {
         ...existing.relays,
         ...normalizedRelays,
       ]);
-      // deliveredAt is monotonic: only demote when the merge introduced a
-      // relay that hasn't acked.
+      // Terminal timestamps are monotonic facts, but adding a relay that is
+      // not already covered by that terminal state reopens the entry.
       final fullyAcked = mergedRelays.every(existing.ackedRelays.contains);
+      final fullySettled = mergedRelays.every(
+        (relay) =>
+            existing.ackedRelays.contains(relay) ||
+            existing.terminalErrors.containsKey(relay),
+      );
       record = existing.copyWith(
         relays: mergedRelays,
         nextAttemptAt: now,
         clearDelivered: !fullyAcked,
+        clearFailed: !fullyAcked && !fullySettled,
       );
     } else {
       record = QueuedBroadcast(
@@ -171,11 +178,13 @@ class OfflineBroadcast {
         relays: normalizedRelays,
         ackedRelays: const [],
         lastErrors: const {},
+        terminalErrors: const {},
         attempts: 0,
         firstAttemptAt: null,
         lastAttemptAt: null,
         nextAttemptAt: now,
         deliveredAt: null,
+        failedAt: null,
         createdAt: now,
       );
     }
@@ -218,6 +227,7 @@ class OfflineBroadcast {
         forcedRelays: [normalized],
         nextAttemptAt: now,
         clearDelivered: isNew,
+        clearFailed: isNew,
       );
     });
     if (updated != null) {
@@ -241,7 +251,7 @@ class OfflineBroadcast {
   /// record is absent.
   Stream<QueuedBroadcast?> watch(String eventId) => _store.watch(eventId);
 
-  /// Live snapshot of every record that has not been delivered yet.
+  /// Live snapshot of every record that still has retryable relays.
   Stream<List<QueuedBroadcast>> watchPending() => _store.watchPending();
 
   /// One-shot read of every record in the store, delivered or not.
@@ -319,19 +329,31 @@ class OfflineBroadcast {
     try {
       final record = await _store.get(id);
       if (record == null) return;
-      // A delivered entry only re-enters _attempt if a force-push is queued.
-      if (record.deliveredAt != null && record.forcedRelays == null) return;
+      // A terminal entry only re-enters _attempt if a force-push is queued.
+      if (record.status != BroadcastStatus.pending &&
+          record.forcedRelays == null) {
+        return;
+      }
 
       // forcedRelays (set by rebroadcast) wins for this single attempt;
       // otherwise we target only relays still owed an ack.
       final targets = record.forcedRelays ?? record.remainingRelays;
       if (targets.isEmpty) {
-        // Nothing to push. Sync deliveredAt if relays are all covered and
-        // we somehow got here with a stale null.
+        // Nothing to push. Sync terminal timestamps if we somehow got here
+        // with stale nulls.
         await _store.update(id, (current) {
-          if (current.relays.every(current.ackedRelays.contains) &&
+          final terminal = _terminalState(
+            current.relays,
+            current.ackedRelays,
+            current.terminalErrors.keys,
+          );
+          if (terminal == _AttemptTerminalState.delivered &&
               current.deliveredAt == null) {
-            return current.copyWith(deliveredAt: _now());
+            return current.copyWith(deliveredAt: _now(), clearFailed: true);
+          }
+          if (terminal == _AttemptTerminalState.failed &&
+              current.failedAt == null) {
+            return current.copyWith(failedAt: _now());
           }
           return null;
         });
@@ -355,6 +377,9 @@ class OfflineBroadcast {
       await _store.update(id, (current) {
         final newAcked = Set<String>.from(current.ackedRelays);
         final newErrors = Map<String, String>.from(current.lastErrors);
+        final newTerminalErrors = Map<String, String>.from(
+          current.terminalErrors,
+        );
 
         final byUrl = <String, RelayBroadcastResponse>{};
         for (final r in results) {
@@ -364,13 +389,21 @@ class OfflineBroadcast {
         for (final relay in targets) {
           final r = byUrl[relay];
           final alreadyAcked = current.ackedRelays.contains(relay);
+          final alreadyTerminal = current.terminalErrors.containsKey(relay);
           if (r != null && r.broadcastSuccessful) {
             newAcked.add(relay);
             newErrors.remove(relay);
-          } else if (!alreadyAcked) {
+            newTerminalErrors.remove(relay);
+          } else if (r != null && _isTerminalOkFalse(r)) {
+            if (!alreadyAcked) {
+              final msg = r.msg.isEmpty ? 'rejected' : r.msg;
+              newTerminalErrors[relay] = msg;
+              newErrors.remove(relay);
+            }
+          } else if (!alreadyAcked && !alreadyTerminal) {
             // Acks are monotonic: a transient failure does not invalidate
             // historical confirmation. We only surface errors for relays
-            // that have never confirmed.
+            // that have never confirmed or terminally failed.
             final msg = r == null
                 ? (syncError ?? 'no response (timeout or relay unreachable)')
                 : (r.msg.isEmpty ? 'rejected' : r.msg);
@@ -379,9 +412,19 @@ class OfflineBroadcast {
         }
         for (final ok in newAcked) {
           newErrors.remove(ok);
+          newTerminalErrors.remove(ok);
+        }
+        for (final terminal in newTerminalErrors.keys) {
+          newErrors.remove(terminal);
         }
 
-        final delivered = current.relays.every(newAcked.contains);
+        final terminalState = _terminalState(
+          current.relays,
+          newAcked,
+          newTerminalErrors.keys,
+        );
+        final delivered = terminalState == _AttemptTerminalState.delivered;
+        final failed = terminalState == _AttemptTerminalState.failed;
         final attempts = current.attempts + 1;
         final nextDelay = computeBackoff(
           attempts: attempts,
@@ -393,10 +436,11 @@ class OfflineBroadcast {
         return current.copyWith(
           ackedRelays: newAcked.toList(growable: false),
           lastErrors: newErrors,
+          terminalErrors: newTerminalErrors,
           attempts: attempts,
           firstAttemptAt: current.firstAttemptAt ?? attemptStart,
           lastAttemptAt: attemptStart,
-          nextAttemptAt: delivered
+          nextAttemptAt: delivered || failed
               ? attemptStart
               : _now() + nextDelay.inMilliseconds,
           // deliveredAt is monotonic: once set it stays set (the historical
@@ -404,6 +448,8 @@ class OfflineBroadcast {
           deliveredAt: delivered
               ? (current.deliveredAt ?? _now())
               : current.deliveredAt,
+          failedAt: failed ? (current.failedAt ?? _now()) : current.failedAt,
+          clearFailed: delivered || !failed,
           clearForcedRelays: true,
         );
       });
@@ -437,4 +483,39 @@ class OfflineBroadcast {
     }
     return out;
   }
+
+  bool _isTerminalOkFalse(RelayBroadcastResponse response) {
+    if (!response.okReceived || response.broadcastSuccessful) return false;
+    final prefixEnd = response.msg.indexOf(':');
+    if (prefixEnd <= 0) return false;
+    final prefix = response.msg.substring(0, prefixEnd).trim().toLowerCase();
+    return _terminalOkFalsePrefixes.contains(prefix);
+  }
+
+  _AttemptTerminalState _terminalState(
+    List<String> relays,
+    Iterable<String> ackedRelays,
+    Iterable<String> terminalRelays,
+  ) {
+    final acked = ackedRelays.toSet();
+    final terminal = terminalRelays.toSet();
+    final hasTerminal = relays.any(terminal.contains);
+    final allAcked = relays.every(acked.contains);
+    if (allAcked) return _AttemptTerminalState.delivered;
+    final allSettled = relays.every(
+      (relay) => acked.contains(relay) || terminal.contains(relay),
+    );
+    if (allSettled && hasTerminal) return _AttemptTerminalState.failed;
+    return _AttemptTerminalState.pending;
+  }
 }
+
+const _terminalOkFalsePrefixes = <String>{
+  'blocked',
+  'error',
+  'invalid',
+  'pow',
+  'restricted',
+};
+
+enum _AttemptTerminalState { pending, failed, delivered }

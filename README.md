@@ -13,9 +13,12 @@ sits in front of `ndk.broadcast` and adds:
   delivery happens in the background and survives restarts.
 - **100 % delivery guarantee.** An entry is only marked `delivered` once
   *every* targeted relay has returned `broadcastSuccessful: true`. Partial
-  success keeps the entry pending and retries the missing relays.
+  success keeps the entry pending and retries the missing retryable relays.
 - **Monotonic ack history.** A relay that has acked never un-acks. A delivered
   entry never silently flips back to pending due to a transient relay outage.
+- **Terminal relay rejections.** NIP-01 `OK false` replies with `pow`,
+  `blocked`, `invalid`, `restricted`, or `error` stop retries for that
+  relay/event pair and are exposed through `BroadcastStatus.failed`.
 - **No auto-deletion.** Delivered entries stay in the store and can be
   re-broadcast later, for instance to a freshly discovered relay.
 
@@ -75,7 +78,7 @@ used. URLs are normalized (lowercased, trailing `/` stripped) before storage.
 If a record with the same `event.id` already exists, the relay lists are
 merged. `deliveredAt` is preserved if every relay in the merged list is
 already in the entry's ack set; otherwise the entry is demoted to pending so
-the missing relays get pushed.
+the missing retryable relays get pushed.
 
 ### `retryNow()`
 
@@ -126,6 +129,29 @@ The full target set must ack. NDK's own `considerDonePercent` knob is *not*
 used as a delivery threshold; it only governs when the underlying future
 completes, which is a different question.
 
+### Terminal failures
+
+NIP-01 requires failed `OK` messages to start with a machine-readable prefix
+followed by `:`. When a relay returns `OK false` with one of these prefixes,
+the shim records the message in `QueuedBroadcast.terminalErrors` and stops
+retrying that relay for the event:
+
+- `blocked`
+- `error`
+- `invalid`
+- `pow`
+- `restricted`
+
+If every target relay is either acked or terminally rejected, and at least one
+relay is terminally rejected, the entry status becomes `BroadcastStatus.failed`
+and it leaves `watchPending()`. Non-terminal failures, including
+`rate-limited`, unknown prefixes, missing colons, timeouts, no response, and
+transport errors, remain retryable.
+
+Manual `rebroadcast(...)` can still force another push. If a previously
+terminally rejected relay later succeeds, its terminal error is cleared and the
+entry can become `delivered`.
+
 ### What the shim does NOT do
 
 - **It never signs.** Whatever event you pass is forwarded as-is to
@@ -134,10 +160,9 @@ completes, which is a different question.
 - **It never deletes records.** Even after full delivery, the entry stays in
   the database. If you want retention, prune it yourself by clearing records
   from sembast directly.
-- **It does not give up.** Without a `maxAttempts` knob, a deterministically
-  rejected event (POW too low, kind not allowed by a relay, etc.) will retry
-  forever with exponential backoff. Inspect `QueuedBroadcast.lastErrors` and
-  manually remove if needed.
+- **It does not apply a max-attempts limit.** Retryable failures continue with
+  exponential backoff until they ack, are manually rebroadcast, or become a
+  terminal NIP-01 rejection.
 
 ## Tuning
 
@@ -168,8 +193,9 @@ caller.broadcast(event, relays)
   await broadcastDoneFuture
         │
         ▼
-  per-relay union into ackedRelays  ────►  delivered when ⊇ relays
-  per-relay error into lastErrors          (otherwise schedule backoff)
+  per-relay union into ackedRelays       ────►  delivered when ⊇ relays
+  terminal OK false into terminalErrors  ────►  failed when all remaining are terminal
+  retryable error into lastErrors              (otherwise schedule backoff)
 ```
 
 A `Timer.periodic` scans `findDue` every `tickInterval` and replays whatever

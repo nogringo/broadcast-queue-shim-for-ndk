@@ -1,3 +1,14 @@
+## Unreleased
+
+- Stop retrying a relay/event pair when the relay returns NIP-01 `OK false`
+  with a terminal machine-readable prefix: `pow`, `blocked`, `invalid`,
+  `restricted`, or `error`.
+- Add `BroadcastStatus.failed`, `QueuedBroadcast.terminalErrors`, and
+  `QueuedBroadcast.failedAt` for entries where every relay is either acked or
+  terminally rejected.
+- Keep retrying non-terminal failures such as `rate-limited`, unknown prefixes,
+  timeouts, no response, and transport errors.
+
 ## 0.2.1
 
 - Fix `int64` overflow in `computeBackoff` on native platforms (Android, iOS,
