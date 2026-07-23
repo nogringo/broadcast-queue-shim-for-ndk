@@ -49,6 +49,59 @@ void main() {
       expect(base.copyWith(deliveredAt: 1).status, BroadcastStatus.delivered);
     });
 
+    test('keyFor composes pubkey and event id, bare when unattributed', () {
+      expect(QueuedBroadcast.keyFor(eventId: 'evt'), 'evt');
+      expect(QueuedBroadcast.keyFor(eventId: 'evt', pubkey: null), 'evt');
+      expect(
+        QueuedBroadcast.keyFor(eventId: 'evt', pubkey: 'npub'),
+        'npub|evt',
+      );
+    });
+
+    test('toMap → fromMap roundtrip preserves pubkey', () {
+      final event = _event();
+      final original = QueuedBroadcast(
+        id: event.id,
+        pubkey: 'account-pubkey',
+        event: event,
+        relays: const ['wss://relay.example'],
+        ackedRelays: const [],
+        lastErrors: const {},
+        terminalErrors: const {},
+        inaccessibleAttempts: const {},
+        attempts: 0,
+        firstAttemptAt: null,
+        lastAttemptAt: null,
+        nextAttemptAt: 0,
+        deliveredAt: null,
+        failedAt: null,
+        createdAt: 0,
+      );
+      final restored = QueuedBroadcast.fromMap(original.toMap());
+      expect(restored.pubkey, 'account-pubkey');
+      expect(restored.key, 'account-pubkey|${event.id}');
+    });
+
+    test('fromMap defaults pubkey to null for older records', () {
+      final event = _event();
+      final restored = QueuedBroadcast.fromMap({
+        'id': event.id,
+        'event': Nip01EventModel.fromEntity(event).toJson(),
+        'relays': const ['wss://relay.example'],
+        'ackedRelays': const [],
+        'lastErrors': const {},
+        'attempts': 0,
+        'firstAttemptAt': null,
+        'lastAttemptAt': null,
+        'nextAttemptAt': 0,
+        'deliveredAt': null,
+        'createdAt': 0,
+        'forcedRelays': null,
+      });
+      expect(restored.pubkey, isNull);
+      expect(restored.key, event.id);
+    });
+
     test('toMap → fromMap roundtrip preserves event id', () {
       final event = _event();
       final original = QueuedBroadcast(

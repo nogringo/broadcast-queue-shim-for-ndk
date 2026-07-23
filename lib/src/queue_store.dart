@@ -14,32 +14,44 @@ class QueueStore {
     : _db = db,
       _store = stringMapStoreFactory.store(storeName);
 
-  Future<QueuedBroadcast?> get(String id) async {
-    final map = await _store.record(id).get(_db);
+  Future<QueuedBroadcast?> get(String key) async {
+    final map = await _store.record(key).get(_db);
     if (map == null) return null;
     return QueuedBroadcast.fromMap(_normalize(map));
   }
 
   Future<void> put(QueuedBroadcast record) async {
-    await _store.record(record.id).put(_db, record.toMap());
+    await _store.record(record.key).put(_db, record.toMap());
   }
 
   /// Atomically read-modify-write a record. The mutator runs inside a sembast
   /// transaction; returning null leaves the record unchanged.
   Future<QueuedBroadcast?> update(
-    String id,
+    String key,
     QueuedBroadcast? Function(QueuedBroadcast current) mutate,
   ) async {
     return _db.transaction((txn) async {
-      final raw = await _store.record(id).get(txn);
+      final raw = await _store.record(key).get(txn);
       if (raw == null) return null;
       final current = QueuedBroadcast.fromMap(_normalize(raw));
       final next = mutate(current);
       if (next == null) return current;
-      await _store.record(id).put(txn, next.toMap());
+      await _store.record(key).put(txn, next.toMap());
       return next;
     });
   }
+
+  /// Deletes every record queued under [pubkey]. Records with no pubkey (queued
+  /// without attribution, or written before 0.4.0) never match. Returns the
+  /// number of records removed.
+  Future<int> deleteByPubkey(String pubkey) => _store.delete(
+    _db,
+    finder: Finder(filter: Filter.equals('pubkey', pubkey)),
+  );
+
+  /// Deletes every record in this store. Other stores in the database are
+  /// left untouched. Returns the number of records removed.
+  Future<int> deleteAll() => _store.delete(_db);
 
   /// Records eligible for an attempt right now: either still pending, or
   /// terminal but carrying a [QueuedBroadcast.forcedRelays] override that

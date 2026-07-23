@@ -1,87 +1,11 @@
 import 'dart:async';
 
 import 'package:broadcast_queue_shim_for_ndk/broadcast_queue_shim_for_ndk.dart';
-import 'package:ndk/entities.dart' show RelayBroadcastResponse;
-import 'package:ndk/ndk.dart';
 import 'package:sembast/sembast_memory.dart';
 import 'package:test/test.dart';
 
-/// Records every call made to the fake broadcast function and lets the test
-/// dictate what each relay should answer.
-class FakeBroadcaster {
-  /// Map from relay URL → result to return. Missing entries default to a
-  /// no-response (timeout) by simulating an empty result list.
-  final Map<String, RelayBroadcastResponse Function()> responders = {};
-
-  /// Throws on every call until cleared. Use to simulate "NDK threw".
-  Object? syncError;
-
-  final List<({Nip01Event event, List<String> relays})> calls = [];
-
-  BroadcastFn get fn => (event, relays) {
-    calls.add((event: event, relays: List.of(relays)));
-    if (syncError != null) throw syncError!;
-    final responses = <RelayBroadcastResponse>[];
-    for (final r in relays) {
-      final responder = responders[r];
-      if (responder != null) responses.add(responder());
-    }
-    return NdkBroadcastResponse(
-      publishEvent: event,
-      broadcastDoneStream: Stream.value(responses),
-    );
-  };
-
-  void ackAll(List<String> relays) {
-    for (final r in relays) {
-      responders[r] = () => RelayBroadcastResponse(
-        relayUrl: r,
-        okReceived: true,
-        broadcastSuccessful: true,
-      );
-    }
-  }
-
-  void fail(String relay, {String msg = 'connection refused'}) {
-    responders[relay] = () => RelayBroadcastResponse(
-      relayUrl: relay,
-      okReceived: false,
-      broadcastSuccessful: false,
-      msg: msg,
-    );
-  }
-
-  void rejectOkFalse(String relay, {required String msg}) {
-    responders[relay] = () => RelayBroadcastResponse(
-      relayUrl: relay,
-      okReceived: true,
-      broadcastSuccessful: false,
-      msg: msg,
-    );
-  }
-}
-
-Nip01Event _event({int seed = 1}) => Nip01Event(
-  pubKey: 'a' * 64,
-  kind: 1,
-  tags: [
-    ['t', 'seed-$seed'],
-  ],
-  content: 'hello $seed',
-);
-
-Future<QueuedBroadcast> _waitFor(
-  OfflineBroadcast outbox,
-  String id,
-  bool Function(QueuedBroadcast r) predicate,
-) async {
-  for (var i = 0; i < 200; i++) {
-    final r = await outbox.get(id);
-    if (r != null && predicate(r)) return r;
-    await Future.delayed(const Duration(milliseconds: 5));
-  }
-  throw TimeoutException('condition not met for $id');
-}
+import 'support/fake_broadcaster.dart';
+import 'support/helpers.dart';
 
 void main() {
   late Database db;
@@ -105,14 +29,14 @@ void main() {
         initialBackoff: const Duration(milliseconds: 10),
       );
 
-      final event = _event();
+      final event = makeEvent();
       final record = await outbox.broadcast(
         event,
         relays: const ['wss://a', 'wss://b'],
       );
       expect(record.status, BroadcastStatus.pending);
 
-      final delivered = await _waitFor(
+      final delivered = await waitFor(
         outbox,
         event.id,
         (r) => r.status == BroadcastStatus.delivered,
@@ -135,10 +59,10 @@ void main() {
       initialBackoff: const Duration(milliseconds: 5),
     );
 
-    final event = _event();
+    final event = makeEvent();
     await outbox.broadcast(event, relays: const ['wss://a', 'wss://b']);
 
-    final pending = await _waitFor(outbox, event.id, (r) => r.attempts >= 1);
+    final pending = await waitFor(outbox, event.id, (r) => r.attempts >= 1);
     expect(pending.status, BroadcastStatus.pending);
     expect(pending.ackedRelays, ['wss://a']);
     expect(pending.remainingRelays, ['wss://b']);
@@ -167,10 +91,10 @@ void main() {
           initialBackoff: const Duration(milliseconds: 1),
         );
 
-        final event = _event(seed: entry.key.hashCode);
+        final event = makeEvent(seed: entry.key.hashCode);
         await outbox.broadcast(event, relays: [entry.key]);
 
-        final failed = await _waitFor(
+        final failed = await waitFor(
           outbox,
           event.id,
           (r) => r.status == BroadcastStatus.failed,
@@ -203,10 +127,10 @@ void main() {
         initialBackoff: const Duration(milliseconds: 1),
       );
 
-      final event = _event();
+      final event = makeEvent();
       await outbox.broadcast(event, relays: const ['wss://a', 'wss://b']);
 
-      final pending = await _waitFor(outbox, event.id, (r) => r.attempts >= 1);
+      final pending = await waitFor(outbox, event.id, (r) => r.attempts >= 1);
       expect(pending.status, BroadcastStatus.pending);
       expect(pending.terminalErrors, {'wss://a': 'PoW: too low'});
       expect(pending.lastErrors, {'wss://b': 'pow too low'});
@@ -214,7 +138,7 @@ void main() {
 
       fake.ackAll(['wss://b']);
       await outbox.retryNow();
-      final failed = await _waitFor(
+      final failed = await waitFor(
         outbox,
         event.id,
         (r) => r.status == BroadcastStatus.failed,
@@ -241,7 +165,7 @@ void main() {
         initialBackoff: const Duration(milliseconds: 1),
       );
 
-      final event = _event();
+      final event = makeEvent();
       await outbox.broadcast(
         event,
         relays: const [
@@ -253,7 +177,7 @@ void main() {
         ],
       );
 
-      final pending = await _waitFor(outbox, event.id, (r) => r.attempts >= 1);
+      final pending = await waitFor(outbox, event.id, (r) => r.attempts >= 1);
       expect(pending.status, BroadcastStatus.pending);
       expect(pending.terminalErrors, isEmpty);
       expect(
@@ -283,7 +207,7 @@ void main() {
         'wss://transport',
       ]);
       await outbox.retryNow();
-      await _waitFor(
+      await waitFor(
         outbox,
         event.id,
         (r) => r.status == BroadcastStatus.delivered,
@@ -314,17 +238,17 @@ void main() {
         maxInaccessibleAttemptsPerRelay: 2,
       );
 
-      final event = _event();
+      final event = makeEvent();
       await outbox.broadcast(event, relays: const ['wss://gone']);
 
-      final pending = await _waitFor(outbox, event.id, (r) => r.attempts >= 1);
+      final pending = await waitFor(outbox, event.id, (r) => r.attempts >= 1);
       expect(pending.status, BroadcastStatus.pending);
       expect(pending.inaccessibleAttempts, {'wss://gone': 1});
       expect(pending.remainingRelays, ['wss://gone']);
 
       await Future.delayed(const Duration(milliseconds: 5));
       await outbox.retryNow();
-      final failed = await _waitFor(
+      final failed = await waitFor(
         outbox,
         event.id,
         (r) => r.status == BroadcastStatus.failed,
@@ -359,10 +283,10 @@ void main() {
       online.add(false);
       await Future.delayed(const Duration(milliseconds: 5));
 
-      final event = _event();
+      final event = makeEvent();
       await outbox.broadcast(event, relays: const ['wss://gone']);
 
-      final pending = await _waitFor(outbox, event.id, (r) => r.attempts >= 1);
+      final pending = await waitFor(outbox, event.id, (r) => r.attempts >= 1);
       expect(pending.status, BroadcastStatus.pending);
       expect(pending.inaccessibleAttempts, isEmpty);
       expect(pending.terminalErrors, isEmpty);
@@ -383,9 +307,9 @@ void main() {
         maxInaccessibleAttemptsPerRelay: 1,
       );
 
-      final event = _event();
+      final event = makeEvent();
       await outbox.broadcast(event, relays: const ['wss://a']);
-      final pending = await _waitFor(outbox, event.id, (r) => r.attempts >= 1);
+      final pending = await waitFor(outbox, event.id, (r) => r.attempts >= 1);
       expect(pending.status, BroadcastStatus.pending);
       expect(pending.inaccessibleAttempts, isEmpty);
       expect(pending.terminalErrors, isEmpty);
@@ -405,9 +329,9 @@ void main() {
       maxInaccessibleAttemptsPerRelay: 1,
     );
 
-    final event = _event();
+    final event = makeEvent();
     await outbox.broadcast(event, relays: const ['wss://rate']);
-    final pending = await _waitFor(outbox, event.id, (r) => r.attempts >= 1);
+    final pending = await waitFor(outbox, event.id, (r) => r.attempts >= 1);
     expect(pending.status, BroadcastStatus.pending);
     expect(pending.inaccessibleAttempts, isEmpty);
     expect(pending.terminalErrors, isEmpty);
@@ -429,13 +353,13 @@ void main() {
         initialBackoff: const Duration(milliseconds: 1),
       );
 
-      final event = _event();
+      final event = makeEvent();
       await outbox.broadcast(
         event,
         relays: const ['wss://a', 'wss://b', 'wss://c'],
       );
 
-      final pending = await _waitFor(outbox, event.id, (r) => r.attempts >= 1);
+      final pending = await waitFor(outbox, event.id, (r) => r.attempts >= 1);
       expect(pending.status, BroadcastStatus.pending);
       expect(pending.ackedRelays, ['wss://a']);
       expect(pending.terminalErrors, {
@@ -445,7 +369,7 @@ void main() {
 
       fake.ackAll(['wss://c']);
       await outbox.retryNow();
-      final failed = await _waitFor(
+      final failed = await waitFor(
         outbox,
         event.id,
         (r) => r.status == BroadcastStatus.failed,
@@ -467,9 +391,9 @@ void main() {
       initialBackoff: const Duration(milliseconds: 1),
     );
 
-    final event = _event();
+    final event = makeEvent();
     await outbox.broadcast(event, relays: const ['wss://a']);
-    await _waitFor(outbox, event.id, (r) => r.status == BroadcastStatus.failed);
+    await waitFor(outbox, event.id, (r) => r.status == BroadcastStatus.failed);
 
     final pending = await outbox.watchPending().first;
     expect(pending, isEmpty);
@@ -488,9 +412,9 @@ void main() {
         initialBackoff: const Duration(milliseconds: 1),
       );
 
-      final event = _event();
+      final event = makeEvent();
       await outbox.broadcast(event, relays: const ['wss://a']);
-      final failed = await _waitFor(
+      final failed = await waitFor(
         outbox,
         event.id,
         (r) => r.status == BroadcastStatus.failed,
@@ -499,7 +423,7 @@ void main() {
 
       fake.ackAll(['wss://a']);
       await outbox.rebroadcast(event.id, relay: 'wss://a');
-      final delivered = await _waitFor(
+      final delivered = await waitFor(
         outbox,
         event.id,
         (r) => r.status == BroadcastStatus.delivered,
@@ -524,14 +448,14 @@ void main() {
       initialBackoff: const Duration(milliseconds: 1),
     );
 
-    final event = _event();
+    final event = makeEvent();
     await outbox.broadcast(event, relays: const ['wss://a', 'wss://b']);
-    await _waitFor(outbox, event.id, (r) => r.attempts >= 1);
+    await waitFor(outbox, event.id, (r) => r.attempts >= 1);
 
     // Now have wss://b ack.
     fake.ackAll(['wss://b']);
     await outbox.retryNow();
-    final delivered = await _waitFor(
+    final delivered = await waitFor(
       outbox,
       event.id,
       (r) => r.status == BroadcastStatus.delivered,
@@ -555,9 +479,9 @@ void main() {
         initialBackoff: const Duration(milliseconds: 1),
       );
 
-      final event = _event();
+      final event = makeEvent();
       await outbox.broadcast(event, relays: const ['wss://a', 'wss://b']);
-      final delivered = await _waitFor(
+      final delivered = await waitFor(
         outbox,
         event.id,
         (r) => r.status == BroadcastStatus.delivered,
@@ -573,7 +497,7 @@ void main() {
 
       await outbox.rebroadcast(event.id);
 
-      final after = await _waitFor(
+      final after = await waitFor(
         outbox,
         event.id,
         (r) => r.attempts > attemptsBefore,
@@ -612,9 +536,9 @@ void main() {
         initialBackoff: const Duration(milliseconds: 1),
       );
 
-      final event = _event();
+      final event = makeEvent();
       await outbox.broadcast(event, relays: const ['wss://a']);
-      await _waitFor(
+      await waitFor(
         outbox,
         event.id,
         (r) => r.status == BroadcastStatus.delivered,
@@ -623,7 +547,7 @@ void main() {
       fake.fail('wss://c');
       await outbox.rebroadcast(event.id, relay: 'wss://c');
 
-      final withC = await _waitFor(
+      final withC = await waitFor(
         outbox,
         event.id,
         (r) => r.relays.contains('wss://c') && r.attempts >= 2,
@@ -656,9 +580,9 @@ void main() {
         initialBackoff: const Duration(milliseconds: 1),
       );
 
-      final event = _event();
+      final event = makeEvent();
       await outbox.broadcast(event, relays: const ['wss://a']);
-      final delivered = await _waitFor(
+      final delivered = await waitFor(
         outbox,
         event.id,
         (r) => r.status == BroadcastStatus.delivered,
@@ -671,7 +595,7 @@ void main() {
       fake.fail('wss://a');
       await outbox.rebroadcast(event.id, relay: 'wss://a');
 
-      final after = await _waitFor(
+      final after = await waitFor(
         outbox,
         event.id,
         (r) => r.attempts > attemptsBefore,
@@ -689,7 +613,7 @@ void main() {
   test('broadcast() throws on empty relays', () async {
     final outbox = OfflineBroadcast(broadcastFn: FakeBroadcaster().fn, db: db);
     expect(
-      () => outbox.broadcast(_event(), relays: const []),
+      () => outbox.broadcast(makeEvent(), relays: const []),
       throwsArgumentError,
     );
     await outbox.dispose();
@@ -705,16 +629,12 @@ void main() {
       initialBackoff: const Duration(milliseconds: 1),
     );
 
-    final event = _event();
+    final event = makeEvent();
     await outbox.broadcast(event, relays: const ['wss://a']);
-    await _waitFor(outbox, event.id, (r) => r.attempts >= 1);
+    await waitFor(outbox, event.id, (r) => r.attempts >= 1);
 
     await outbox.broadcast(event, relays: const ['wss://b']);
-    final merged = await _waitFor(
-      outbox,
-      event.id,
-      (r) => r.relays.length == 2,
-    );
+    final merged = await waitFor(outbox, event.id, (r) => r.relays.length == 2);
     expect(merged.relays, containsAll(['wss://a', 'wss://b']));
 
     await outbox.dispose();
@@ -729,12 +649,12 @@ void main() {
       initialBackoff: const Duration(milliseconds: 1),
     );
 
-    final event = _event();
+    final event = makeEvent();
     await outbox.broadcast(
       event,
       relays: const ['WSS://Relay.Example/', 'wss://relay.example'],
     );
-    final r = await _waitFor(outbox, event.id, (r) => r.attempts >= 1);
+    final r = await waitFor(outbox, event.id, (r) => r.attempts >= 1);
     expect(r.relays, ['wss://relay.example']);
 
     await outbox.dispose();
@@ -750,9 +670,9 @@ void main() {
         initialBackoff: const Duration(milliseconds: 1),
       );
 
-      final event = _event();
+      final event = makeEvent();
       await outbox.broadcast(event, relays: const ['wss://a']);
-      final r = await _waitFor(outbox, event.id, (r) => r.attempts >= 1);
+      final r = await waitFor(outbox, event.id, (r) => r.attempts >= 1);
       expect(r.status, BroadcastStatus.pending);
       expect(r.lastErrors['wss://a'], contains('no signer'));
 
@@ -764,7 +684,7 @@ void main() {
     final outbox = OfflineBroadcast(broadcastFn: FakeBroadcaster().fn, db: db);
     await outbox.dispose();
     expect(
-      () => outbox.broadcast(_event(), relays: const ['wss://a']),
+      () => outbox.broadcast(makeEvent(), relays: const ['wss://a']),
       throwsStateError,
     );
   });

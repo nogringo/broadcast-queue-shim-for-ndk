@@ -23,15 +23,9 @@ sits in front of `ndk.broadcast` and adds:
   online attempts is also stopped for that event.
 - **No auto-deletion.** Delivered entries stay in the store and can be
   re-broadcast later, for instance to a freshly discovered relay.
-
-## Install
-
-```yaml
-dependencies:
-  broadcast_queue_shim_for_ndk: ^0.1.0
-  ndk: ^0.8.3
-  sembast: ^3.8.7
-```
+- **Account-scoped clearing.** Attribute an entry to an account with the
+  optional `pubkey` argument, then wipe just that account's queue on logout via
+  `clearLocalAccountData`.
 
 ## Quick start
 
@@ -71,16 +65,50 @@ Future<void> main() async {
 
 ## Semantics
 
-### `broadcast(event, relays: [...])`
+### `broadcast(event, relays: [...], {String? pubkey})`
 
 Persists `event` and schedules an immediate attempt to push it to every URL in
 `relays`. The list is **required**: gossip-based relay selection is never
 used. URLs are normalized (lowercased, trailing `/` stripped) before storage.
 
-If a record with the same `event.id` already exists, the relay lists are
-merged. `deliveredAt` is preserved if every relay in the merged list is
-already in the entry's ack set; otherwise the entry is demoted to pending so
-the missing retryable relays get pushed.
+Records are keyed by the pair `(event.id, pubkey)`. If a record with the same
+pair already exists, the relay lists are merged: `deliveredAt` is preserved if
+every relay in the merged list is already in the entry's ack set, otherwise the
+entry is demoted to pending so the missing retryable relays get pushed. The
+same event queued under a different `pubkey` is a separate record.
+
+`pubkey` is optional and defaults to `null` (unattributed). See
+[Account-scoped clearing](#account-scoped-clearing) for what it buys you.
+
+### Account-scoped clearing
+
+`pubkey` labels the local account an entry was queued under, so its queue can
+be dropped on logout:
+
+```dart
+await outbox.broadcast(event, relays: [...], pubkey: myPubkey);
+...
+await outbox.clearLocalAccountData(pubkey: myPubkey); // wipe this account
+await outbox.clearAllLocalData();                     // wipe everything
+```
+
+- It is a plain label, **not** `event.pubKey`. An event may be queued under an
+  account that did not sign it (rebroadcasting someone else's note), and for a
+  gift wrap (kind 1059) `event.pubKey` is an ephemeral throwaway key. Pass the
+  real sending account so NIP-17 DMs and other wraps can still be cleared.
+- Leaving `pubkey` `null` leaves the entry **unattributed**: retried like any
+  other, keyed by the bare `event.id`, but never removed by
+  `clearLocalAccountData`. Entries written before 0.4.0 are unattributed.
+- `clearLocalAccountData` removes matching entries for good, delivered or not;
+  pending ones will never be retried again. It is safe to call while attempts
+  are in flight (a concurrent attempt no-ops once its record is gone), but do
+  not `broadcast` for an account you are clearing, as an overlapping enqueue can
+  re-create its record.
+- `get`, `watch`, and `rebroadcast` take the same optional `pubkey` to select
+  which record they act on. `watchPending` and `listAll` span all accounts;
+  filter on `QueuedBroadcast.pubkey` for one.
+- `clearAllLocalData` empties the shim's store only; other sembast stores in the
+  same database are untouched.
 
 ### `retryNow()`
 
@@ -110,11 +138,12 @@ OfflineBroadcast(
 If you don't pass anything, the shim assumes it is always online and the
 periodic timer runs unconditionally (pre-0.2 behavior).
 
-### `rebroadcast(id, {String? relay})`
+### `rebroadcast(id, {String? pubkey, String? relay})`
 
 `ackedRelays` and `deliveredAt` are monotonic. `rebroadcast` never rewrites
 the past; it queues a one-shot push via a transient `forcedRelays` override
-that the next attempt consumes.
+that the next attempt consumes. `pubkey` selects which record to act on, the
+same value passed to `broadcast`; it returns `null` if no such record exists.
 
 - `rebroadcast(id)`: schedules an immediate push to **every** relay in the
   entry's `relays` list, including those that already acked. Useful when you
@@ -161,9 +190,9 @@ entry can become `delivered`.
 - **It never signs.** Whatever event you pass is forwarded as-is to
   `ndk.broadcast.broadcast`. If the event is unsigned, NDK signs it using its
   configured `EventSigner`. The shim has no opinion on signing.
-- **It never deletes records.** Even after full delivery, the entry stays in
-  the database. If you want retention, prune it yourself by clearing records
-  from sembast directly.
+- **It never auto-deletes records.** Even after full delivery, an entry stays
+  in the database until you remove it, via `clearLocalAccountData` /
+  `clearAllLocalData` or by clearing sembast records directly.
 - **It does not apply a max-attempts limit.** Retryable failures continue with
   exponential backoff until they ack, are manually rebroadcast, become a
   terminal NIP-01 rejection, or hit the inaccessible-relay cutoff.

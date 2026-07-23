@@ -23,7 +23,8 @@ typedef BroadcastFn =
 ///    each `pending` entry until every relay in [relays] has acknowledged it
 ///    or returned a terminal NIP-01 rejection.
 ///  - Records are never auto-deleted. A terminal entry stays in the store for
-///    manual `rebroadcast` or inspection.
+///    manual `rebroadcast` or inspection. Explicit removal is available via
+///    `clearLocalAccountData` and `clearAllLocalData`.
 class OfflineBroadcast {
   final BroadcastFn _broadcastFn;
   final QueueStore _store;
@@ -159,12 +160,22 @@ class OfflineBroadcast {
   /// first attempt in the background. The returned [QueuedBroadcast] reflects
   /// the persisted state, not the attempt outcome.
   ///
-  /// If a record with the same `event.id` already exists, its target relays
-  /// are merged with [relays] and it is rescheduled for an immediate attempt.
-  /// The event payload is *not* overwritten; the original event wins.
+  /// [pubkey] attributes the entry to a local account so it can later be
+  /// dropped by [clearLocalAccountData]. It is a plain label, not `event.pubKey`:
+  /// pass the account you queued it under, which for a gift wrap (kind 1059) is
+  /// the real sender, not the event's ephemeral key. Leave it `null` and the
+  /// entry is unattributed: retried like any other, but never removed by an
+  /// account-scoped clear.
+  ///
+  /// Records are keyed by `(event.id, pubkey)`. If one with the same pair
+  /// already exists, its target relays are merged with [relays] and it is
+  /// rescheduled for an immediate attempt. The event payload is *not*
+  /// overwritten; the original event wins. The same event queued under a
+  /// different [pubkey] is a separate record.
   Future<QueuedBroadcast> broadcast(
     Nip01Event event, {
     required List<String> relays,
+    String? pubkey,
   }) async {
     _ensureNotDisposed();
     if (relays.isEmpty) {
@@ -172,8 +183,9 @@ class OfflineBroadcast {
     }
     final normalizedRelays = _dedupNormalized(relays);
     final now = _now();
+    final key = QueuedBroadcast.keyFor(eventId: event.id, pubkey: pubkey);
 
-    final existing = await _store.get(event.id);
+    final existing = await _store.get(key);
     final QueuedBroadcast record;
     if (existing != null) {
       final mergedRelays = _dedupNormalized([
@@ -197,6 +209,7 @@ class OfflineBroadcast {
     } else {
       record = QueuedBroadcast(
         id: event.id,
+        pubkey: pubkey,
         event: event,
         relays: normalizedRelays,
         ackedRelays: const [],
@@ -215,7 +228,7 @@ class OfflineBroadcast {
     await _store.put(record);
 
     // Kick off the first attempt without blocking the caller.
-    unawaited(_attempt(record.id));
+    unawaited(_attempt(record.key));
     return record;
   }
 
@@ -233,10 +246,18 @@ class OfflineBroadcast {
   ///   schedules an immediate one-shot push to that single relay. If the
   ///   relay is new, `deliveredAt` is cleared (the entry can no longer claim
   ///   100% delivery until the new relay acks); otherwise it is preserved.
-  Future<QueuedBroadcast?> rebroadcast(String eventId, {String? relay}) async {
+  ///
+  /// [pubkey] selects which record to rebroadcast, matching the value passed to
+  /// [broadcast]. Returns `null` if no such record exists.
+  Future<QueuedBroadcast?> rebroadcast(
+    String eventId, {
+    String? pubkey,
+    String? relay,
+  }) async {
     _ensureNotDisposed();
     final now = _now();
-    final updated = await _store.update(eventId, (current) {
+    final key = QueuedBroadcast.keyFor(eventId: eventId, pubkey: pubkey);
+    final updated = await _store.update(key, (current) {
       if (relay == null) {
         return current.copyWith(
           forcedRelays: List<String>.from(current.relays),
@@ -255,7 +276,7 @@ class OfflineBroadcast {
       );
     });
     if (updated != null) {
-      unawaited(_attempt(eventId));
+      unawaited(_attempt(key));
     }
     return updated;
   }
@@ -267,19 +288,43 @@ class OfflineBroadcast {
     await _tick();
   }
 
-  /// Returns the currently persisted record for [eventId], or `null` if none
-  /// exists.
-  Future<QueuedBroadcast?> get(String eventId) => _store.get(eventId);
+  /// Returns the currently persisted record for `(eventId, pubkey)`, or `null`
+  /// if none exists.
+  Future<QueuedBroadcast?> get(String eventId, {String? pubkey}) =>
+      _store.get(QueuedBroadcast.keyFor(eventId: eventId, pubkey: pubkey));
 
-  /// Live snapshot of the record for [eventId]. Emits `null` if/while the
-  /// record is absent.
-  Stream<QueuedBroadcast?> watch(String eventId) => _store.watch(eventId);
+  /// Live snapshot of the record for `(eventId, pubkey)`. Emits `null` if/while
+  /// the record is absent.
+  Stream<QueuedBroadcast?> watch(String eventId, {String? pubkey}) =>
+      _store.watch(QueuedBroadcast.keyFor(eventId: eventId, pubkey: pubkey));
 
-  /// Live snapshot of every record that still has retryable relays.
+  /// Live snapshot of every record that still has retryable relays, across all
+  /// accounts. Filter on [QueuedBroadcast.pubkey] for a single account.
   Stream<List<QueuedBroadcast>> watchPending() => _store.watchPending();
 
-  /// One-shot read of every record in the store, delivered or not.
+  /// One-shot read of every record in the store, delivered or not, across all
+  /// accounts.
   Future<List<QueuedBroadcast>> listAll() => _store.findAll();
+
+  /// Removes every queued broadcast attributed to [pubkey], delivered or not.
+  /// Pending entries are dropped for good and will never be retried. Entries
+  /// queued without a pubkey (see [broadcast]) are left untouched; use
+  /// [clearAllLocalData] to remove those.
+  ///
+  /// Safe to call while attempts are in flight: a concurrent attempt writes
+  /// through a sembast transaction that no-ops once the record is gone, so it
+  /// cannot resurrect a cleared entry. A [broadcast] call for the same account
+  /// that overlaps this clear may still re-create its record; do not enqueue
+  /// for an account you are clearing.
+  Future<void> clearLocalAccountData({required String pubkey}) async {
+    await _store.deleteByPubkey(pubkey);
+  }
+
+  /// Removes every queued broadcast, all accounts and unattributed entries
+  /// included. Leaves other sembast stores in the same database untouched.
+  Future<void> clearAllLocalData() async {
+    await _store.deleteAll();
+  }
 
   /// Starts the periodic retry timer and replays anything already due.
   /// Also subscribes to `onlineSignal` if one was provided. Idempotent:
@@ -340,18 +385,18 @@ class OfflineBroadcast {
     for (final record in due) {
       if (_disposed) return;
       // Fire-and-forget per entry; _attempt guards against duplicates.
-      unawaited(_attempt(record.id));
+      unawaited(_attempt(record.key));
     }
   }
 
-  Future<void> _attempt(String id) async {
+  Future<void> _attempt(String key) async {
     if (_disposed) return;
-    if (_inFlight.containsKey(id)) return; // already attempting
+    if (_inFlight.containsKey(key)) return; // already attempting
     final completer = Completer<void>();
-    _inFlight[id] = completer.future;
+    _inFlight[key] = completer.future;
 
     try {
-      final record = await _store.get(id);
+      final record = await _store.get(key);
       if (record == null) return;
       // A terminal entry only re-enters _attempt if a force-push is queued.
       if (record.status != BroadcastStatus.pending &&
@@ -365,7 +410,7 @@ class OfflineBroadcast {
       if (targets.isEmpty) {
         // Nothing to push. Sync terminal timestamps if we somehow got here
         // with stale nulls.
-        await _store.update(id, (current) {
+        await _store.update(key, (current) {
           final terminal = _terminalState(
             current.relays,
             current.ackedRelays,
@@ -399,7 +444,7 @@ class OfflineBroadcast {
         results = const [];
       }
 
-      await _store.update(id, (current) {
+      await _store.update(key, (current) {
         final newAcked = Set<String>.from(current.ackedRelays);
         final newErrors = Map<String, String>.from(current.lastErrors);
         final newTerminalErrors = Map<String, String>.from(
@@ -500,7 +545,7 @@ class OfflineBroadcast {
         );
       });
     } finally {
-      _inFlight.remove(id);
+      _inFlight.remove(key);
       completer.complete();
     }
   }

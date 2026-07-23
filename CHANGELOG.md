@@ -1,3 +1,19 @@
+## 0.4.0
+
+- Add an optional `pubkey` argument to `broadcast`, `get`, `watch`, and
+  `rebroadcast` that attributes a queued entry to a local account. Records are
+  now keyed by the pair `(event.id, pubkey)`, so the same event queued under
+  two accounts is two independent records. `QueuedBroadcast` gains a `pubkey`
+  field and `key` / `keyFor` helpers.
+- Add `clearLocalAccountData({required String pubkey})` to remove every entry
+  queued under an account (for logout) and `clearAllLocalData()` to empty the
+  store. `pubkey` is a plain label, not `event.pubKey`: gift wraps (kind 1059)
+  carry an ephemeral event pubkey, so pass the real sending account for NIP-17
+  DMs to be clearable.
+- Entries queued without a `pubkey` stay unattributed and keep the bare
+  `event.id` as their sembast key, so databases written before 0.4.0 keep
+  working. Unattributed entries are never removed by `clearLocalAccountData`.
+
 ## 0.3.0
 
 - Stop retrying a relay/event pair when the relay returns NIP-01 `OK false`

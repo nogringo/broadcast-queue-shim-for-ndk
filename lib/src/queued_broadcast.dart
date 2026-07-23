@@ -20,8 +20,17 @@ enum BroadcastStatus {
 /// Immutable from the caller's perspective: every mutation goes through the
 /// store and yields a fresh instance.
 class QueuedBroadcast {
-  /// Nostr event id (also the sembast record key).
+  /// Nostr event id. Combined with [pubkey] it forms the sembast record [key].
   final String id;
+
+  /// Pubkey of the account this broadcast was queued under, or `null` if the
+  /// caller did not attribute it. This is NOT `event.pubKey`: an event can be
+  /// queued under an account that did not sign it (rebroadcasting someone
+  /// else's note), and for a gift wrap (kind 1059) `event.pubKey` is an
+  /// ephemeral throwaway key. It is part of the record's identity, so the same
+  /// event queued under two pubkeys is two independent records.
+  /// [OfflineBroadcast.clearLocalAccountData] matches on this field.
+  final String? pubkey;
 
   /// The full event as it will be (re-)broadcast.
   final Nip01Event event;
@@ -86,6 +95,7 @@ class QueuedBroadcast {
   /// are produced by [OfflineBroadcast].
   QueuedBroadcast({
     required this.id,
+    this.pubkey,
     required this.event,
     required this.relays,
     required this.ackedRelays,
@@ -101,6 +111,15 @@ class QueuedBroadcast {
     required this.createdAt,
     this.forcedRelays,
   });
+
+  /// The sembast record key for this entry.
+  String get key => keyFor(eventId: id, pubkey: pubkey);
+
+  /// Builds the sembast record key for an (event, account) pair: `pubkey|eventId`
+  /// when bound to an account, the bare event id otherwise. Account-less entries
+  /// keep their pre-0.4.0 key so existing databases keep working.
+  static String keyFor({required String eventId, String? pubkey}) =>
+      pubkey == null ? eventId : '$pubkey|$eventId';
 
   /// `pending` while any relay is still retryable, otherwise terminal.
   BroadcastStatus get status {
@@ -142,6 +161,7 @@ class QueuedBroadcast {
   }) {
     return QueuedBroadcast(
       id: id,
+      pubkey: pubkey,
       event: event,
       relays: relays ?? this.relays,
       ackedRelays: ackedRelays ?? this.ackedRelays,
@@ -165,6 +185,7 @@ class QueuedBroadcast {
   Map<String, dynamic> toMap() {
     return {
       'id': id,
+      'pubkey': pubkey,
       'event': Nip01EventModel.fromEntity(event).toJson(),
       'relays': relays,
       'ackedRelays': ackedRelays,
@@ -186,6 +207,7 @@ class QueuedBroadcast {
   static QueuedBroadcast fromMap(Map<String, dynamic> map) {
     return QueuedBroadcast(
       id: map['id'] as String,
+      pubkey: map['pubkey'] as String?,
       event: Nip01EventModel.fromJson(map['event'] as Map),
       relays: (map['relays'] as List).cast<String>(),
       ackedRelays: (map['ackedRelays'] as List).cast<String>(),
