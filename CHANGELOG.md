@@ -1,3 +1,7 @@
+## 0.5.0
+
+- Require `ndk: ^0.9.0`.
+
 ## 0.4.0
 
 - Add an optional `pubkey` argument to `broadcast`, `get`, `watch`, and

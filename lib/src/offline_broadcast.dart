@@ -137,9 +137,8 @@ class OfflineBroadcast {
   }) {
     final onlineSignal = ndk.connectivity.relayConnectivityChanges
         .map(
-          (relays) => relays.values.any(
-            (rc) => rc.isConnected && isPublicRelayHost(rc.url),
-          ),
+          (relays) =>
+              relays.any((rc) => rc.isConnected && isPublicRelayHost(rc.url)),
         )
         .distinct();
     return OfflineBroadcast(
