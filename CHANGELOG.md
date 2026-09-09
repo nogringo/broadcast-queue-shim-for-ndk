@@ -1,3 +1,8 @@
+## 0.5.1
+
+- Widen the `ndk` constraint to `>=0.9.0 <0.11.0` so the shim can be used
+  alongside ndk 0.10.x.
+
 ## 0.5.0
 
 - Require `ndk: ^0.9.0`.
