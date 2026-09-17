@@ -23,6 +23,10 @@ sits in front of `ndk.broadcast` and adds:
   online attempts is also stopped for that event.
 - **No auto-deletion.** Delivered entries stay in the store and can be
   re-broadcast later, for instance to a freshly discovered relay.
+- **Relay sets resolved offline.** Target an account's NIP-65 outbox, its
+  recipients' inboxes, NIP-17 DM relays or NIP-37 private relays without
+  knowing the URLs yet. The
+  set is stored as is and resolved by the worker once online, then frozen.
 - **Account-scoped clearing.** Attribute an entry to an account with the
   optional `pubkey` argument, then wipe just that account's queue on logout via
   `clearLocalAccountData`.
@@ -31,7 +35,7 @@ sits in front of `ndk.broadcast` and adds:
 
 ```dart
 import 'package:broadcast_queue_shim_for_ndk/broadcast_queue_shim_for_ndk.dart';
-import 'package:ndk/ndk.dart';
+import 'package:ndk/ndk.dart' hide RelaySet;
 import 'package:sembast/sembast_io.dart';
 
 Future<void> main() async {
@@ -58,27 +62,117 @@ Future<void> main() async {
   // responsibility.
   await outbox.broadcast(
     event,
-    relays: const ['wss://relay.damus.io', 'wss://nos.lol'],
+    relaySet: const RelaySet.explicit([
+      'wss://relay.damus.io',
+      'wss://nos.lol',
+    ]),
   );
+
+  // Or let the shim find the author's write relays later, offline included.
+  await outbox.broadcast(event, relaySet: RelaySet.outbox(myPubKey));
 }
 ```
 
+`package:ndk/ndk.dart` also exports a `RelaySet`. In a file that imports both
+packages, add `hide RelaySet` to the ndk import.
+
 ## Semantics
 
-### `broadcast(event, relays: [...], {String? pubkey})`
+### `broadcast(event, {required RelaySet relaySet, String? pubkey})`
 
-Persists `event` and schedules an immediate attempt to push it to every URL in
-`relays`. The list is **required**: gossip-based relay selection is never
-used. URLs are normalized (lowercased, trailing `/` stripped) before storage.
+Persists `event` and schedules an immediate attempt to the relays of
+`relaySet` (see [Relay sets](#relay-sets)). URLs are normalized (lowercased,
+trailing `/` stripped) before storage. `broadcast` never waits on the network.
+A set that needs no lookup and holds no relay throws an `ArgumentError`.
 
 Records are keyed by the pair `(event.id, pubkey)`. If a record with the same
 pair already exists, the relay lists are merged: `deliveredAt` is preserved if
 every relay in the merged list is already in the entry's ack set, otherwise the
-entry is demoted to pending so the missing retryable relays get pushed. The
-same event queued under a different `pubkey` is a separate record.
+entry is demoted to pending so the missing retryable relays get pushed. A relay
+set that needs a lookup is merged the same way once it resolves. The same event
+queued under a different `pubkey` is a separate record.
 
 `pubkey` is optional and defaults to `null` (unattributed). See
 [Account-scoped clearing](#account-scoped-clearing) for what it buys you.
+
+### Relay sets
+
+A `RelaySet` describes where an event goes instead of listing URLs:
+
+```dart
+RelaySet.explicit(['wss://a', 'wss://b'])  // fixed URLs
+RelaySet.outbox(pubkey)                    // NIP-65 write relays
+RelaySet.nip65(pubkey)                     // every NIP-65 relay, read and write
+RelaySet.inbox([pubkeys])                  // NIP-65 read relays of each pubkey
+RelaySet.dm([pubkeys])                     // NIP-17 DM relays (kind 10050)
+RelaySet.private(pubkey)                   // NIP-37 private relays (kind 10013)
+RelaySet.union([a, b])                     // every relay of every set
+RelaySet.fallback([a, b])                  // first set with at least one relay
+```
+
+Use `dm`, not `inbox`, for gift wraps. A user publishes their kind 10050 to
+their NIP-65 write relays, so a `dm` lookup first resolves the pubkey's NIP-65,
+then searches the kind 10050 on those write relays. If the NIP-65 is
+unavailable, so is the DM list. If it is not found, the kind 10050 is still
+searched on the discovery relays alone.
+
+`private` follows the same chaining for the NIP-37 kind 10013, which must be
+published on the NIP-65 write relays. Its relays are encrypted to their owner,
+so `pubkey` must be an account the shim can decrypt for. With NDK, that is an
+account in `ndk.accounts` whose signer supports NIP-44. While the account is
+missing (for instance before the app has logged it in) or decryption fails,
+the lookup is unavailable and retried.
+
+Decryption goes through `ndk.decryptedEventPayloads`: a given kind 10013 event
+is decrypted once, concurrent lookups share that decryption, and later lookups
+read the plaintext from NDK's cache without the account or its signer. The
+signer is asked again only when the user publishes a new list. That cache is as
+persistent as the `CacheManager` given to NDK, and clearing it is up to the app
+through NDK's cache API: `clearLocalAccountData` does not touch it. Once frozen,
+the private relays are also stored in plain text in the queue's sembast
+database.
+
+The set is persisted with the entry, which stays `pending` with an empty
+`relays` list and a non-null `pendingRelaySet`. The worker resolves it on its
+next attempt and, **the first time every lookup concludes**, freezes the result
+into `relays` and clears `pendingRelaySet`. Later retries push to those frozen
+relays and never look the lists up again. A set made only of `explicit` sets is
+resolved at enqueue time.
+
+Each relay list lookup ends in one of three states:
+
+- **found**: the list exists (it may hold no relay of the wanted kind).
+- **not found**: at least one relay sent EOSE and none holds the list. It
+  counts as an empty list.
+- **unavailable**: no relay answered (offline, timeouts, disconnections,
+  `CLOSED`). Whether the list exists is unknown.
+
+If any lookup the result depends on is unavailable, nothing is frozen: the
+entry records `resolutionError`, increments `resolutionAttempts` and retries
+with backoff. This matters for `fallback`: an offline lookup never falls
+through to the next set, so going offline cannot lock an entry onto its
+fallback relays. `fallback` only moves on when a set resolves to no relay.
+
+If the whole set resolves to no relay, the entry becomes `failed` with
+`resolutionError: 'relay set resolved to no relay'`. Calling `broadcast` again
+with a set queues a new resolution on the same entry.
+
+`OfflineBroadcast.withNdk` reads kind 10002, 10050 and 10013 through
+`ndk.requests.query`, NDK's cache first, so a list NDK has already seen resolves
+offline. The lists are queried on `defaultIndexerRelays` (coracle, yabu.me,
+purplepag.es, nos.social indexers), not on NDK's bootstrap relays, plus the
+write relays for a kind 10050 or 10013. Pass `relayListDiscoveryRelays` to
+query other indexers. With the default constructor, pass your own `relayListFn`; without
+one, only explicit sets are accepted.
+
+Only the relay query is timed out (`relayListQueryTimeout`, NDK's query timeout
+by default). The shim never times out a lookup as a whole, so a remote signer
+(NIP-46, NIP-55) can wait for user approval as long as it takes. `dispose` does
+not wait for such a lookup: the resolution is abandoned without writing and
+starts over on the next run.
+
+A "not found" answer from a fast relay can arrive while a slower relay holding
+the list times out.
 
 ### Account-scoped clearing
 
@@ -86,7 +180,7 @@ same event queued under a different `pubkey` is a separate record.
 be dropped on logout:
 
 ```dart
-await outbox.broadcast(event, relays: [...], pubkey: myPubkey);
+await outbox.broadcast(event, relaySet: ..., pubkey: myPubkey);
 ...
 await outbox.clearLocalAccountData(pubkey: myPubkey); // wipe this account
 await outbox.clearAllLocalData();                     // wipe everything
@@ -209,16 +303,21 @@ OfflineBroadcast.withNdk(
   maxBackoff: const Duration(minutes: 30),       // backoff ceiling
   perAttemptTimeout: const Duration(seconds: 10),// gives up on a single NDK call after this
   maxInaccessibleAttemptsPerRelay: 12,           // stops dead relays while online
+  relayListDiscoveryRelays: defaultIndexerRelays, // relays queried for relay lists
+  relayListQueryTimeout: null,                   // relay list query timeout, NDK's by default
 );
 ```
 
 ## Architecture in one diagram
 
 ```
-caller.broadcast(event, relays)
+caller.broadcast(event, relaySet)
         │
         ▼
   sembast write ──── durable, returns to caller here
+        │
+        ▼
+  resolve pendingRelaySet (once)         ────►  retry with backoff while unavailable
         │
         ▼
   ndk.broadcast.broadcast(event, specificRelays: remaining)

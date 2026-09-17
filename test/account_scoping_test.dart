@@ -2,7 +2,7 @@ import 'dart:async';
 
 import 'package:broadcast_queue_shim_for_ndk/broadcast_queue_shim_for_ndk.dart';
 import 'package:ndk/entities.dart' show RelayBroadcastResponse;
-import 'package:ndk/ndk.dart';
+import 'package:ndk/ndk.dart' hide RelaySet;
 import 'package:sembast/sembast_memory.dart';
 import 'package:test/test.dart';
 
@@ -32,8 +32,16 @@ void main() {
     );
 
     final event = makeEvent();
-    await outbox.broadcast(event, relays: const ['wss://a'], pubkey: _alice);
-    await outbox.broadcast(event, relays: const ['wss://a'], pubkey: _bob);
+    await outbox.broadcast(
+      event,
+      relaySet: const RelaySet.explicit(['wss://a']),
+      pubkey: _alice,
+    );
+    await outbox.broadcast(
+      event,
+      relaySet: const RelaySet.explicit(['wss://a']),
+      pubkey: _bob,
+    );
 
     final all = await outbox.listAll();
     expect(all.length, 2);
@@ -55,9 +63,20 @@ void main() {
     final e1 = makeEvent(seed: 1);
     final e2 = makeEvent(seed: 2);
     final e3 = makeEvent(seed: 3);
-    await outbox.broadcast(e1, relays: const ['wss://a'], pubkey: _alice);
-    await outbox.broadcast(e2, relays: const ['wss://a'], pubkey: _bob);
-    await outbox.broadcast(e3, relays: const ['wss://a']); // unattributed
+    await outbox.broadcast(
+      e1,
+      relaySet: const RelaySet.explicit(['wss://a']),
+      pubkey: _alice,
+    );
+    await outbox.broadcast(
+      e2,
+      relaySet: const RelaySet.explicit(['wss://a']),
+      pubkey: _bob,
+    );
+    await outbox.broadcast(
+      e3,
+      relaySet: const RelaySet.explicit(['wss://a']),
+    ); // unattributed
 
     await outbox.clearLocalAccountData(pubkey: _alice);
 
@@ -79,7 +98,11 @@ void main() {
     );
 
     final event = makeEvent();
-    await outbox.broadcast(event, relays: const ['wss://gone'], pubkey: _alice);
+    await outbox.broadcast(
+      event,
+      relaySet: const RelaySet.explicit(['wss://gone']),
+      pubkey: _alice,
+    );
     await waitFor(outbox, event.id, (r) => r.attempts >= 1, pubkey: _alice);
     final callsAfterFirst = fake.calls.length;
 
@@ -106,7 +129,11 @@ void main() {
       );
 
       final event = makeEvent();
-      await outbox.broadcast(event, relays: const ['wss://a'], pubkey: _alice);
+      await outbox.broadcast(
+        event,
+        relaySet: const RelaySet.explicit(['wss://a']),
+        pubkey: _alice,
+      );
 
       // Wait until the attempt has handed off to the (parked) broadcaster.
       for (var i = 0; i < 400 && fake.calls.isEmpty; i++) {
@@ -153,7 +180,11 @@ void main() {
         tags: const [],
         content: 'sealed',
       );
-      await outbox.broadcast(wrap, relays: const ['wss://a'], pubkey: _alice);
+      await outbox.broadcast(
+        wrap,
+        relaySet: const RelaySet.explicit(['wss://a']),
+        pubkey: _alice,
+      );
 
       // Clearing by the event's own pubkey must not touch it.
       await outbox.clearLocalAccountData(pubkey: 'e' * 64);
@@ -182,10 +213,13 @@ void main() {
 
       await outbox.broadcast(
         makeEvent(seed: 1),
-        relays: const ['wss://a'],
+        relaySet: const RelaySet.explicit(['wss://a']),
         pubkey: _alice,
       );
-      await outbox.broadcast(makeEvent(seed: 2), relays: const ['wss://a']);
+      await outbox.broadcast(
+        makeEvent(seed: 2),
+        relaySet: const RelaySet.explicit(['wss://a']),
+      );
 
       await outbox.clearAllLocalData();
 
@@ -205,7 +239,10 @@ void main() {
     );
 
     final event = makeEvent();
-    await outbox.broadcast(event, relays: const ['wss://a']);
+    await outbox.broadcast(
+      event,
+      relaySet: const RelaySet.explicit(['wss://a']),
+    );
 
     await outbox.clearLocalAccountData(pubkey: _alice);
     expect(await outbox.get(event.id), isNotNull);

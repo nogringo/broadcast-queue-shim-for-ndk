@@ -1,3 +1,22 @@
+## 0.6.0
+
+- **Breaking:** require `ndk: ^0.10.0-dev.1`.
+- **Breaking:** `broadcast` takes `required RelaySet relaySet` instead of
+  `relays`. Migrate with `relaySet: RelaySet.explicit([...])`. Files importing
+  `package:ndk/ndk.dart` need `hide RelaySet`.
+- Add `RelaySet`: `explicit`, `outbox`, `inbox`, `nip65`, `dm` (kind 10050),
+  `private` (NIP-37, kind 10013), `union` and `fallback`. Sets are persisted,
+  resolved by the worker (offline included) and frozen at the first successful
+  resolution. `dm` and `private` lists are searched on the NIP-65 write relays.
+- A lookup is found, not found (EOSE) or unavailable. Unavailable ones retry
+  with backoff and never make `fallback` fall through. An entry resolving to no
+  relay is `failed`.
+- Relay lists are queried on `defaultIndexerRelays`. Private lists are
+  decrypted once through `ndk.decryptedEventPayloads`, never timed out.
+- New options: `relayListFn`, `relayListDiscoveryRelays`,
+  `relayListQueryTimeout`. New `QueuedBroadcast` fields: `pendingRelaySet`,
+  `resolutionAttempts`, `resolutionError`.
+
 ## 0.5.1
 
 - Widen the `ndk` constraint to `>=0.9.0 <0.11.0` so the shim can be used

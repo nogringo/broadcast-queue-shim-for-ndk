@@ -2,7 +2,7 @@ import 'dart:async';
 
 import 'package:broadcast_queue_shim_for_ndk/broadcast_queue_shim_for_ndk.dart';
 import 'package:ndk/entities.dart' show RelayBroadcastResponse;
-import 'package:ndk/ndk.dart';
+import 'package:ndk/ndk.dart' hide RelaySet;
 import 'package:sembast/sembast_memory.dart';
 import 'package:test/test.dart';
 
@@ -62,7 +62,10 @@ void main() {
 
     // Seed the queue with a failing entry (so it stays pending and would
     // normally be picked up by every tick).
-    await outbox.broadcast(_event(), relays: const ['wss://a']);
+    await outbox.broadcast(
+      _event(),
+      relaySet: const RelaySet.explicit(['wss://a']),
+    );
     outbox.start();
     signal.add(false);
     // Let broadcast()'s unconditional attempt + start()'s initial replay
@@ -94,7 +97,10 @@ void main() {
       onlineSignal: signal.stream,
     );
 
-    await outbox.broadcast(_event(), relays: const ['wss://a']);
+    await outbox.broadcast(
+      _event(),
+      relaySet: const RelaySet.explicit(['wss://a']),
+    );
     await _flush();
     final base = fake.calls;
     expect(base, 1);
@@ -103,7 +109,7 @@ void main() {
     signal.add(false);
     await _flush();
 
-    // Wait long enough for backoff to expire — if anything were going to fire
+    // Wait long enough for backoff to expire. If anything were going to fire
     // from the timer it would have, but the timer is 30s away.
     await Future<void>.delayed(const Duration(milliseconds: 50));
     expect(fake.calls, base, reason: 'still offline, no new attempt');
@@ -132,7 +138,10 @@ void main() {
       onlineSignal: signal.stream,
     );
 
-    await outbox.broadcast(_event(), relays: const ['wss://a']);
+    await outbox.broadcast(
+      _event(),
+      relaySet: const RelaySet.explicit(['wss://a']),
+    );
     outbox.start();
     signal.add(false);
     // Let the initial attempt + start replay land and the entry's backoff

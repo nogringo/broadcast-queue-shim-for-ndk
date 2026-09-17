@@ -53,15 +53,16 @@ class QueueStore {
   /// left untouched. Returns the number of records removed.
   Future<int> deleteAll() => _store.delete(_db);
 
-  /// Records eligible for an attempt right now: either still pending, or
-  /// terminal but carrying a [QueuedBroadcast.forcedRelays] override that
-  /// hasn't been consumed yet.
+  /// Records eligible for an attempt right now: either still pending (relay
+  /// set unresolved included), or terminal but carrying a
+  /// [QueuedBroadcast.forcedRelays] override that hasn't been consumed yet.
   Future<List<QueuedBroadcast>> findDue({required int now}) async {
     final finder = Finder(
       filter: Filter.custom((record) {
         final m = record.value as Map;
         final nextAttemptAt = m['nextAttemptAt'] as int;
         if (nextAttemptAt > now) return false;
+        if (m['pendingRelaySet'] != null) return true;
         if (m['deliveredAt'] == null && m['failedAt'] == null) return true;
         return m['forcedRelays'] != null;
       }),
@@ -93,9 +94,12 @@ class QueueStore {
 
   Stream<List<QueuedBroadcast>> watchPending() {
     final finder = Finder(
-      filter: Filter.and([
-        Filter.equals('deliveredAt', null),
-        Filter.equals('failedAt', null),
+      filter: Filter.or([
+        Filter.notNull('pendingRelaySet'),
+        Filter.and([
+          Filter.equals('deliveredAt', null),
+          Filter.equals('failedAt', null),
+        ]),
       ]),
     );
     return _store

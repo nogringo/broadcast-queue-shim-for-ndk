@@ -1,14 +1,18 @@
 import 'dart:async';
+import 'dart:convert';
 import 'dart:math';
 
 import 'package:ndk/entities.dart' show RelayBroadcastResponse;
-import 'package:ndk/ndk.dart';
+import 'package:ndk/ndk.dart' hide RelaySet;
 import 'package:sembast/sembast.dart';
 
 import 'backoff.dart';
+import 'indexer_relays.dart';
+import 'ndk_relay_lists.dart';
 import 'queue_store.dart';
 import 'queued_broadcast.dart';
 import 'relay_host_filter.dart';
+import 'relay_set.dart';
 
 /// Function that hands an event off to the network. Matches the call pattern
 /// of `Ndk.broadcast.broadcast` with `specificRelays` always provided.
@@ -18,15 +22,19 @@ typedef BroadcastFn =
 /// Offline-first wrapper around NDK's broadcast.
 ///
 /// Contract:
-///  - `broadcast(event, relays: [...])` persists the event before returning.
+///  - `broadcast(event, relaySet: ...)` persists the event before returning,
+///    without touching the network.
+///  - A [RelaySet] is resolved by the worker, once, then frozen into the
+///    record's relays.
 ///  - Delivery is guaranteed in the eventual sense: the shim keeps retrying
-///    each `pending` entry until every relay in [relays] has acknowledged it
-///    or returned a terminal NIP-01 rejection.
+///    each `pending` entry until every relay has acknowledged it or returned a
+///    terminal NIP-01 rejection.
 ///  - Records are never auto-deleted. A terminal entry stays in the store for
 ///    manual `rebroadcast` or inspection. Explicit removal is available via
 ///    `clearLocalAccountData` and `clearAllLocalData`.
 class OfflineBroadcast {
   final BroadcastFn _broadcastFn;
+  final RelayListFn? _relayListFn;
   final QueueStore _store;
   final Duration _tickInterval;
   final Duration _initialBackoff;
@@ -42,9 +50,11 @@ class OfflineBroadcast {
   bool _isOnline = true;
   final Map<String, Future<void>> _inFlight = <String, Future<void>>{};
   bool _disposed = false;
+  final Completer<void> _disposal = Completer<void>();
 
   OfflineBroadcast._({
     required BroadcastFn broadcastFn,
+    required RelayListFn? relayListFn,
     required Database db,
     required String storeName,
     required Duration tickInterval,
@@ -56,6 +66,7 @@ class OfflineBroadcast {
     Random? random,
     int Function()? now,
   }) : _broadcastFn = broadcastFn,
+       _relayListFn = relayListFn,
        _store = QueueStore(db: db, storeName: storeName),
        _tickInterval = tickInterval,
        _initialBackoff = initialBackoff,
@@ -80,8 +91,14 @@ class OfflineBroadcast {
   /// as terminally failed for the event. Attempts while [onlineSignal] is
   /// `false`, global broadcaster exceptions, and relay-level OK responses do
   /// not increment this counter.
+  ///
+  /// [relayListFn] resolves the relay lists a [RelaySet] refers to. Without
+  /// it, only sets built from [RelaySet.explicit] can be broadcast. The shim
+  /// puts no timeout on it: bound the network part yourself, and let a signer
+  /// take as long as it needs.
   factory OfflineBroadcast({
     required BroadcastFn broadcastFn,
+    RelayListFn? relayListFn,
     required Database db,
     String storeName = 'broadcasts',
     Duration tickInterval = const Duration(seconds: 30),
@@ -102,6 +119,7 @@ class OfflineBroadcast {
     }
     return OfflineBroadcast._(
       broadcastFn: broadcastFn,
+      relayListFn: relayListFn,
       db: db,
       storeName: storeName,
       tickInterval: tickInterval,
@@ -123,11 +141,18 @@ class OfflineBroadcast {
   /// are filtered out, so a connected dev relay on localhost will not mask a
   /// real outage).
   ///
+  /// Relay lists for a [RelaySet] are read through `ndk.requests.query`, from
+  /// NDK's cache first, on [relayListDiscoveryRelays]. [relayListQueryTimeout]
+  /// bounds each query and defaults to NDK's query timeout. Decrypting a
+  /// private relay list with the account's signer is never timed out.
+  ///
   /// [maxInaccessibleAttemptsPerRelay] has the same meaning as on the default
   /// constructor.
   factory OfflineBroadcast.withNdk(
     Ndk ndk, {
     required Database db,
+    Iterable<String> relayListDiscoveryRelays = defaultIndexerRelays,
+    Duration? relayListQueryTimeout,
     String storeName = 'broadcasts',
     Duration tickInterval = const Duration(seconds: 30),
     Duration initialBackoff = const Duration(seconds: 5),
@@ -144,6 +169,11 @@ class OfflineBroadcast {
     return OfflineBroadcast(
       broadcastFn: (event, relays) =>
           ndk.broadcast.broadcast(nostrEvent: event, specificRelays: relays),
+      relayListFn: ndkRelayListFn(
+        ndk,
+        discoveryRelays: relayListDiscoveryRelays,
+        queryTimeout: relayListQueryTimeout,
+      ),
       db: db,
       storeName: storeName,
       tickInterval: tickInterval,
@@ -155,9 +185,13 @@ class OfflineBroadcast {
     );
   }
 
-  /// Persists [event] for delivery to every URL in [relays], then fires the
-  /// first attempt in the background. The returned [QueuedBroadcast] reflects
-  /// the persisted state, not the attempt outcome.
+  /// Persists [event] for delivery, then fires the first attempt in the
+  /// background. The returned [QueuedBroadcast] reflects the persisted state,
+  /// not the attempt outcome.
+  ///
+  /// A [relaySet] that needs a lookup is stored unresolved and resolved by the
+  /// worker, so this call never waits on the network. One that needs no lookup
+  /// is resolved here and must yield at least one relay.
   ///
   /// [pubkey] attributes the entry to a local account so it can later be
   /// dropped by [clearLocalAccountData]. It is a plain label, not `event.pubKey`:
@@ -167,62 +201,72 @@ class OfflineBroadcast {
   /// account-scoped clear.
   ///
   /// Records are keyed by `(event.id, pubkey)`. If one with the same pair
-  /// already exists, its target relays are merged with [relays] and it is
-  /// rescheduled for an immediate attempt. The event payload is *not*
-  /// overwritten; the original event wins. The same event queued under a
+  /// already exists, the new relays are merged into it and it is rescheduled
+  /// for an immediate attempt: explicit relays join its relay list, a set that
+  /// needs a lookup is resolved and its relays joined. The event payload is
+  /// *not* overwritten; the original event wins. The same event queued under a
   /// different [pubkey] is a separate record.
   Future<QueuedBroadcast> broadcast(
     Nip01Event event, {
-    required List<String> relays,
+    required RelaySet relaySet,
     String? pubkey,
   }) async {
     _ensureNotDisposed();
-    if (relays.isEmpty) {
-      throw ArgumentError.value(relays, 'relays', 'must not be empty');
+    if (relaySet.needsLookup && _relayListFn == null) {
+      throw StateError('this relay relaySet needs a relayListFn to resolve');
     }
-    final normalizedRelays = _dedupNormalized(relays);
     final now = _now();
     final key = QueuedBroadcast.keyFor(eventId: event.id, pubkey: pubkey);
 
     final existing = await _store.get(key);
     final QueuedBroadcast record;
-    if (existing != null) {
-      final mergedRelays = _dedupNormalized([
-        ...existing.relays,
-        ...normalizedRelays,
-      ]);
-      // Terminal timestamps are monotonic facts, but adding a relay that is
-      // not already covered by that terminal state reopens the entry.
-      final fullyAcked = mergedRelays.every(existing.ackedRelays.contains);
-      final fullySettled = mergedRelays.every(
-        (relay) =>
-            existing.ackedRelays.contains(relay) ||
-            existing.terminalErrors.containsKey(relay),
-      );
-      record = existing.copyWith(
-        relays: mergedRelays,
-        nextAttemptAt: now,
-        clearDelivered: !fullyAcked,
-        clearFailed: !fullyAcked && !fullySettled,
-      );
+    if (relaySet.needsLookup) {
+      final pending = existing?.pendingRelaySet;
+      record =
+          existing?.copyWith(
+            pendingRelaySet: pending == null
+                ? relaySet
+                : RelaySet.union([pending, relaySet]),
+            resolutionAttempts: 0,
+            clearResolutionError: true,
+            nextAttemptAt: now,
+          ) ??
+          _newRecord(
+            event,
+            pubkey,
+            now,
+            relays: const [],
+            pendingRelaySet: relaySet,
+          );
     } else {
-      record = QueuedBroadcast(
-        id: event.id,
-        pubkey: pubkey,
-        event: event,
-        relays: normalizedRelays,
-        ackedRelays: const [],
-        lastErrors: const {},
-        terminalErrors: const {},
-        inaccessibleAttempts: const {},
-        attempts: 0,
-        firstAttemptAt: null,
-        lastAttemptAt: null,
-        nextAttemptAt: now,
-        deliveredAt: null,
-        failedAt: null,
-        createdAt: now,
-      );
+      final resolved =
+          await resolveRelaySet(relaySet, _noLookup) as RelaysResolved;
+      final normalizedRelays = _dedupNormalized(resolved.relays);
+      if (normalizedRelays.isEmpty) {
+        throw ArgumentError.value(relaySet, 'relaySet', 'has no relay');
+      }
+      if (existing != null) {
+        final mergedRelays = _dedupNormalized([
+          ...existing.relays,
+          ...normalizedRelays,
+        ]);
+        // Terminal timestamps are monotonic facts, but adding a relay that is
+        // not already covered by that terminal state reopens the entry.
+        final fullyAcked = mergedRelays.every(existing.ackedRelays.contains);
+        final fullySettled = mergedRelays.every(
+          (relay) =>
+              existing.ackedRelays.contains(relay) ||
+              existing.terminalErrors.containsKey(relay),
+        );
+        record = existing.copyWith(
+          relays: mergedRelays,
+          nextAttemptAt: now,
+          clearDelivered: !fullyAcked,
+          clearFailed: !fullyAcked && !fullySettled,
+        );
+      } else {
+        record = _newRecord(event, pubkey, now, relays: normalizedRelays);
+      }
     }
     await _store.put(record);
 
@@ -230,6 +274,37 @@ class OfflineBroadcast {
     unawaited(_attempt(record.key));
     return record;
   }
+
+  QueuedBroadcast _newRecord(
+    Nip01Event event,
+    String? pubkey,
+    int now, {
+    required List<String> relays,
+    RelaySet? pendingRelaySet,
+  }) => QueuedBroadcast(
+    id: event.id,
+    pubkey: pubkey,
+    event: event,
+    relays: relays,
+    pendingRelaySet: pendingRelaySet,
+    ackedRelays: const [],
+    lastErrors: const {},
+    terminalErrors: const {},
+    inaccessibleAttempts: const {},
+    attempts: 0,
+    firstAttemptAt: null,
+    lastAttemptAt: null,
+    nextAttemptAt: now,
+    deliveredAt: null,
+    failedAt: null,
+    createdAt: now,
+  );
+
+  static Future<RelayLookup> _noLookup(
+    String _,
+    RelayListKind _,
+    List<String> _,
+  ) => throw StateError('explicit relay sets never look up a relay list');
 
   /// Re-pushes a queued event without rewriting its delivery history.
   ///
@@ -344,10 +419,12 @@ class OfflineBroadcast {
 
   /// Stops the retry timer, cancels the connectivity subscription, and waits
   /// for any in-flight attempt to finish so the caller can safely close the
-  /// underlying sembast database.
+  /// underlying sembast database. A relay set resolution still waiting, on a
+  /// signer for instance, is abandoned without writing.
   Future<void> dispose() async {
     if (_disposed) return;
     _disposed = true;
+    _disposal.complete();
     _tickTimer?.cancel();
     _tickTimer = null;
     await _onlineSub?.cancel();
@@ -395,7 +472,11 @@ class OfflineBroadcast {
     _inFlight[key] = completer.future;
 
     try {
-      final record = await _store.get(key);
+      final stored = await _store.get(key);
+      if (stored == null) return;
+      final record = stored.pendingRelaySet == null
+          ? stored
+          : await _resolvePendingRelaySet(stored);
       if (record == null) return;
       // A terminal entry only re-enters _attempt if a force-push is queued.
       if (record.status != BroadcastStatus.pending &&
@@ -415,15 +496,21 @@ class OfflineBroadcast {
             current.ackedRelays,
             current.terminalErrors.keys,
           );
-          if (terminal == _AttemptTerminalState.delivered &&
-              current.deliveredAt == null) {
-            return current.copyWith(deliveredAt: _now(), clearFailed: true);
+          final setDelivered =
+              terminal == _AttemptTerminalState.delivered &&
+              current.deliveredAt == null;
+          final setFailed =
+              terminal == _AttemptTerminalState.failed &&
+              current.failedAt == null;
+          if (!setDelivered && !setFailed && current.forcedRelays == null) {
+            return null;
           }
-          if (terminal == _AttemptTerminalState.failed &&
-              current.failedAt == null) {
-            return current.copyWith(failedAt: _now());
-          }
-          return null;
+          return current.copyWith(
+            deliveredAt: setDelivered ? _now() : null,
+            failedAt: setFailed ? _now() : null,
+            clearFailed: setDelivered,
+            clearForcedRelays: true,
+          );
         });
         return;
       }
@@ -549,6 +636,81 @@ class OfflineBroadcast {
     }
   }
 
+  /// Resolves [record]'s pending relay set and freezes the result. Returns the
+  /// resolved record, or `null` when the set stays pending: a lookup was
+  /// unavailable, or `broadcast` changed the set meanwhile.
+  Future<QueuedBroadcast?> _resolvePendingRelaySet(
+    QueuedBroadcast record,
+  ) async {
+    final set = record.pendingRelaySet!;
+    final resolution = await Future.any([
+      _resolve(set),
+      _disposal.future.then((_) => null),
+    ]);
+    if (resolution == null) return null;
+
+    final now = _now();
+    final resolvedSet = jsonEncode(set.toMap());
+    final updated = await _store.update(record.key, (current) {
+      final pending = current.pendingRelaySet;
+      if (pending == null || jsonEncode(pending.toMap()) != resolvedSet) {
+        return null;
+      }
+      switch (resolution) {
+        case RelaysUnavailable(:final reason):
+          final attempts = current.resolutionAttempts + 1;
+          final delay = computeBackoff(
+            attempts: attempts,
+            initial: _initialBackoff,
+            max: _maxBackoff,
+            random: _random,
+          );
+          return current.copyWith(
+            resolutionAttempts: attempts,
+            resolutionError: reason,
+            nextAttemptAt: now + delay.inMilliseconds,
+          );
+        case RelaysResolved(:final relays):
+          final merged = _dedupNormalized([...current.relays, ...relays]);
+          final terminal = _terminalState(
+            merged,
+            current.ackedRelays,
+            current.terminalErrors.keys,
+          );
+          final delivered = terminal == _AttemptTerminalState.delivered;
+          final failed = terminal == _AttemptTerminalState.failed;
+          return current.copyWith(
+            relays: merged,
+            clearPendingRelaySet: true,
+            resolutionAttempts: 0,
+            resolutionError: merged.isEmpty
+                ? 'relay set resolved to no relay'
+                : null,
+            clearResolutionError: merged.isNotEmpty,
+            nextAttemptAt: now,
+            deliveredAt: delivered ? (current.deliveredAt ?? now) : null,
+            clearDelivered: !delivered,
+            failedAt: failed ? (current.failedAt ?? now) : null,
+            clearFailed: !failed,
+          );
+      }
+    });
+    if (updated == null || updated.pendingRelaySet != null) return null;
+    return updated;
+  }
+
+  Future<RelayResolution> _resolve(RelaySet set) async {
+    final relayListFn = _relayListFn;
+    if (relayListFn == null) {
+      return const RelaysUnavailable('no relayListFn configured');
+    }
+    try {
+      return await resolveRelaySet(set, relayListFn);
+    } catch (e) {
+      return RelaysUnavailable(e.toString());
+    }
+  }
+
   void _ensureNotDisposed() {
     if (_disposed) {
       throw StateError('OfflineBroadcast has been disposed');
@@ -595,6 +757,7 @@ class OfflineBroadcast {
     Iterable<String> ackedRelays,
     Iterable<String> terminalRelays,
   ) {
+    if (relays.isEmpty) return _AttemptTerminalState.failed;
     final acked = ackedRelays.toSet();
     final terminal = terminalRelays.toSet();
     final hasTerminal = relays.any(terminal.contains);

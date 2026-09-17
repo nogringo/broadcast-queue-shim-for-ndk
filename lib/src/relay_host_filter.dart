@@ -23,7 +23,7 @@ bool _isPrivateOrLoopbackIPv4(String host) {
   if (parts.any((p) => p > 255)) return false;
   final a = parts[0];
   final b = parts[1];
-  // 127.0.0.0/8 — loopback
+  // 127.0.0.0/8: loopback
   if (a == 127) return true;
   // 10.0.0.0/8
   if (a == 10) return true;
@@ -31,7 +31,7 @@ bool _isPrivateOrLoopbackIPv4(String host) {
   if (a == 172 && b >= 16 && b <= 31) return true;
   // 192.168.0.0/16
   if (a == 192 && b == 168) return true;
-  // 169.254.0.0/16 — link-local
+  // 169.254.0.0/16: link-local
   if (a == 169 && b == 254) return true;
   return false;
 }
@@ -39,18 +39,18 @@ bool _isPrivateOrLoopbackIPv4(String host) {
 bool _isPrivateOrLoopbackIPv6(String host) {
   // URI.host returns the IPv6 form without the surrounding brackets.
   if (!host.contains(':')) return false;
-  // ::1 — loopback (canonical or expanded forms).
+  // ::1: loopback (canonical or expanded forms).
   if (host == '::1' || host == '0:0:0:0:0:0:0:1') return true;
-  // :: — unspecified (treat as local).
+  // Unspecified address ::, treated as local.
   if (host == '::' || host == '0:0:0:0:0:0:0:0') return true;
-  // fe80::/10 — link-local. First 10 bits = 1111 1110 10, i.e. first hextet
+  // fe80::/10: link-local. First 10 bits = 1111 1110 10, i.e. first hextet
   // in [fe80, febf].
   final firstHextet = host.split(':').first;
   if (firstHextet.length >= 3) {
     final prefix = int.tryParse(firstHextet, radix: 16);
     if (prefix != null) {
       if (prefix >= 0xfe80 && prefix <= 0xfebf) return true;
-      // fc00::/7 — Unique Local Address. First hextet in [fc00, fdff].
+      // fc00::/7: Unique Local Address. First hextet in [fc00, fdff].
       if (prefix >= 0xfc00 && prefix <= 0xfdff) return true;
     }
   }

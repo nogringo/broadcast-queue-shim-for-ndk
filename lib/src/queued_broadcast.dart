@@ -1,4 +1,6 @@
-import 'package:ndk/ndk.dart';
+import 'package:ndk/ndk.dart' hide RelaySet;
+
+import 'relay_set.dart';
 
 /// Status of a queued broadcast.
 enum BroadcastStatus {
@@ -35,9 +37,22 @@ class QueuedBroadcast {
   /// The full event as it will be (re-)broadcast.
   final Nip01Event event;
 
-  /// The list of relays this event must reach. Fixed at creation, but may grow
-  /// if `rebroadcast(id, relay: ...)` introduces a new relay.
+  /// The list of relays this event must reach. Grows when [pendingRelaySet]
+  /// resolves, when `broadcast` merges more relays, or when
+  /// `rebroadcast(id, relay: ...)` introduces a new relay.
   final List<String> relays;
+
+  /// Relay set still to resolve, or `null` once its relays are frozen into
+  /// [relays]. While non-null the record is [BroadcastStatus.pending].
+  final RelaySet? pendingRelaySet;
+
+  /// Consecutive resolutions of [pendingRelaySet] that ended unavailable.
+  /// Drives the backoff until the set resolves.
+  final int resolutionAttempts;
+
+  /// Why the last resolution did not produce relays: a lookup was unavailable,
+  /// or the set resolved to no relay at all. `null` otherwise.
+  final String? resolutionError;
 
   /// Subset of [relays] that have returned `broadcastSuccessful: true` at
   /// least once across all attempts.
@@ -98,6 +113,9 @@ class QueuedBroadcast {
     this.pubkey,
     required this.event,
     required this.relays,
+    this.pendingRelaySet,
+    this.resolutionAttempts = 0,
+    this.resolutionError,
     required this.ackedRelays,
     required this.lastErrors,
     required this.terminalErrors,
@@ -121,8 +139,10 @@ class QueuedBroadcast {
   static String keyFor({required String eventId, String? pubkey}) =>
       pubkey == null ? eventId : '$pubkey|$eventId';
 
-  /// `pending` while any relay is still retryable, otherwise terminal.
+  /// `pending` while the relay set is unresolved or any relay is still
+  /// retryable, otherwise terminal.
   BroadcastStatus get status {
+    if (pendingRelaySet != null) return BroadcastStatus.pending;
     if (deliveredAt != null) return BroadcastStatus.delivered;
     if (failedAt != null) return BroadcastStatus.failed;
     return BroadcastStatus.pending;
@@ -141,9 +161,13 @@ class QueuedBroadcast {
   ///
   /// Use `clearDelivered: true` to force-clear [deliveredAt] (`null` arg
   /// alone is ambiguous with "leave as-is" for nullable fields). Same idea
-  /// for `clearForcedRelays`.
+  /// for `clearForcedRelays`, `clearPendingRelaySet` and
+  /// `clearResolutionError`.
   QueuedBroadcast copyWith({
     List<String>? relays,
+    RelaySet? pendingRelaySet,
+    int? resolutionAttempts,
+    String? resolutionError,
     List<String>? ackedRelays,
     Map<String, String>? lastErrors,
     Map<String, String>? terminalErrors,
@@ -158,12 +182,21 @@ class QueuedBroadcast {
     bool clearDelivered = false,
     bool clearFailed = false,
     bool clearForcedRelays = false,
+    bool clearPendingRelaySet = false,
+    bool clearResolutionError = false,
   }) {
     return QueuedBroadcast(
       id: id,
       pubkey: pubkey,
       event: event,
       relays: relays ?? this.relays,
+      pendingRelaySet: clearPendingRelaySet
+          ? null
+          : (pendingRelaySet ?? this.pendingRelaySet),
+      resolutionAttempts: resolutionAttempts ?? this.resolutionAttempts,
+      resolutionError: clearResolutionError
+          ? null
+          : (resolutionError ?? this.resolutionError),
       ackedRelays: ackedRelays ?? this.ackedRelays,
       lastErrors: lastErrors ?? this.lastErrors,
       terminalErrors: terminalErrors ?? this.terminalErrors,
@@ -188,6 +221,9 @@ class QueuedBroadcast {
       'pubkey': pubkey,
       'event': Nip01EventModel.fromEntity(event).toJson(),
       'relays': relays,
+      'pendingRelaySet': pendingRelaySet?.toMap(),
+      'resolutionAttempts': resolutionAttempts,
+      'resolutionError': resolutionError,
       'ackedRelays': ackedRelays,
       'lastErrors': lastErrors,
       'terminalErrors': terminalErrors,
@@ -210,6 +246,11 @@ class QueuedBroadcast {
       pubkey: map['pubkey'] as String?,
       event: Nip01EventModel.fromJson(map['event'] as Map),
       relays: (map['relays'] as List).cast<String>(),
+      pendingRelaySet: map['pendingRelaySet'] == null
+          ? null
+          : RelaySet.fromMap(map['pendingRelaySet'] as Map),
+      resolutionAttempts: (map['resolutionAttempts'] as int?) ?? 0,
+      resolutionError: map['resolutionError'] as String?,
       ackedRelays: (map['ackedRelays'] as List).cast<String>(),
       lastErrors: (map['lastErrors'] as Map).map(
         (k, v) => MapEntry(k as String, v as String),

@@ -32,7 +32,7 @@ void main() {
       final event = makeEvent();
       final record = await outbox.broadcast(
         event,
-        relays: const ['wss://a', 'wss://b'],
+        relaySet: const RelaySet.explicit(['wss://a', 'wss://b']),
       );
       expect(record.status, BroadcastStatus.pending);
 
@@ -60,7 +60,10 @@ void main() {
     );
 
     final event = makeEvent();
-    await outbox.broadcast(event, relays: const ['wss://a', 'wss://b']);
+    await outbox.broadcast(
+      event,
+      relaySet: const RelaySet.explicit(['wss://a', 'wss://b']),
+    );
 
     final pending = await waitFor(outbox, event.id, (r) => r.attempts >= 1);
     expect(pending.status, BroadcastStatus.pending);
@@ -92,7 +95,7 @@ void main() {
         );
 
         final event = makeEvent(seed: entry.key.hashCode);
-        await outbox.broadcast(event, relays: [entry.key]);
+        await outbox.broadcast(event, relaySet: RelaySet.explicit([entry.key]));
 
         final failed = await waitFor(
           outbox,
@@ -128,7 +131,10 @@ void main() {
       );
 
       final event = makeEvent();
-      await outbox.broadcast(event, relays: const ['wss://a', 'wss://b']);
+      await outbox.broadcast(
+        event,
+        relaySet: const RelaySet.explicit(['wss://a', 'wss://b']),
+      );
 
       final pending = await waitFor(outbox, event.id, (r) => r.attempts >= 1);
       expect(pending.status, BroadcastStatus.pending);
@@ -168,13 +174,13 @@ void main() {
       final event = makeEvent();
       await outbox.broadcast(
         event,
-        relays: const [
+        relaySet: const RelaySet.explicit([
           'wss://rate',
           'wss://unknown',
           'wss://empty',
           'wss://no-response',
           'wss://transport',
-        ],
+        ]),
       );
 
       final pending = await waitFor(outbox, event.id, (r) => r.attempts >= 1);
@@ -239,7 +245,10 @@ void main() {
       );
 
       final event = makeEvent();
-      await outbox.broadcast(event, relays: const ['wss://gone']);
+      await outbox.broadcast(
+        event,
+        relaySet: const RelaySet.explicit(['wss://gone']),
+      );
 
       final pending = await waitFor(outbox, event.id, (r) => r.attempts >= 1);
       expect(pending.status, BroadcastStatus.pending);
@@ -284,7 +293,10 @@ void main() {
       await Future.delayed(const Duration(milliseconds: 5));
 
       final event = makeEvent();
-      await outbox.broadcast(event, relays: const ['wss://gone']);
+      await outbox.broadcast(
+        event,
+        relaySet: const RelaySet.explicit(['wss://gone']),
+      );
 
       final pending = await waitFor(outbox, event.id, (r) => r.attempts >= 1);
       expect(pending.status, BroadcastStatus.pending);
@@ -308,7 +320,10 @@ void main() {
       );
 
       final event = makeEvent();
-      await outbox.broadcast(event, relays: const ['wss://a']);
+      await outbox.broadcast(
+        event,
+        relaySet: const RelaySet.explicit(['wss://a']),
+      );
       final pending = await waitFor(outbox, event.id, (r) => r.attempts >= 1);
       expect(pending.status, BroadcastStatus.pending);
       expect(pending.inaccessibleAttempts, isEmpty);
@@ -330,7 +345,10 @@ void main() {
     );
 
     final event = makeEvent();
-    await outbox.broadcast(event, relays: const ['wss://rate']);
+    await outbox.broadcast(
+      event,
+      relaySet: const RelaySet.explicit(['wss://rate']),
+    );
     final pending = await waitFor(outbox, event.id, (r) => r.attempts >= 1);
     expect(pending.status, BroadcastStatus.pending);
     expect(pending.inaccessibleAttempts, isEmpty);
@@ -356,7 +374,7 @@ void main() {
       final event = makeEvent();
       await outbox.broadcast(
         event,
-        relays: const ['wss://a', 'wss://b', 'wss://c'],
+        relaySet: const RelaySet.explicit(['wss://a', 'wss://b', 'wss://c']),
       );
 
       final pending = await waitFor(outbox, event.id, (r) => r.attempts >= 1);
@@ -392,7 +410,10 @@ void main() {
     );
 
     final event = makeEvent();
-    await outbox.broadcast(event, relays: const ['wss://a']);
+    await outbox.broadcast(
+      event,
+      relaySet: const RelaySet.explicit(['wss://a']),
+    );
     await waitFor(outbox, event.id, (r) => r.status == BroadcastStatus.failed);
 
     final pending = await outbox.watchPending().first;
@@ -413,7 +434,10 @@ void main() {
       );
 
       final event = makeEvent();
-      await outbox.broadcast(event, relays: const ['wss://a']);
+      await outbox.broadcast(
+        event,
+        relaySet: const RelaySet.explicit(['wss://a']),
+      );
       final failed = await waitFor(
         outbox,
         event.id,
@@ -449,7 +473,10 @@ void main() {
     );
 
     final event = makeEvent();
-    await outbox.broadcast(event, relays: const ['wss://a', 'wss://b']);
+    await outbox.broadcast(
+      event,
+      relaySet: const RelaySet.explicit(['wss://a', 'wss://b']),
+    );
     await waitFor(outbox, event.id, (r) => r.attempts >= 1);
 
     // Now have wss://b ack.
@@ -480,7 +507,10 @@ void main() {
       );
 
       final event = makeEvent();
-      await outbox.broadcast(event, relays: const ['wss://a', 'wss://b']);
+      await outbox.broadcast(
+        event,
+        relaySet: const RelaySet.explicit(['wss://a', 'wss://b']),
+      );
       final delivered = await waitFor(
         outbox,
         event.id,
@@ -537,7 +567,10 @@ void main() {
       );
 
       final event = makeEvent();
-      await outbox.broadcast(event, relays: const ['wss://a']);
+      await outbox.broadcast(
+        event,
+        relaySet: const RelaySet.explicit(['wss://a']),
+      );
       await waitFor(
         outbox,
         event.id,
@@ -581,7 +614,10 @@ void main() {
       );
 
       final event = makeEvent();
-      await outbox.broadcast(event, relays: const ['wss://a']);
+      await outbox.broadcast(
+        event,
+        relaySet: const RelaySet.explicit(['wss://a']),
+      );
       final delivered = await waitFor(
         outbox,
         event.id,
@@ -613,7 +649,8 @@ void main() {
   test('broadcast() throws on empty relays', () async {
     final outbox = OfflineBroadcast(broadcastFn: FakeBroadcaster().fn, db: db);
     expect(
-      () => outbox.broadcast(makeEvent(), relays: const []),
+      () =>
+          outbox.broadcast(makeEvent(), relaySet: const RelaySet.explicit([])),
       throwsArgumentError,
     );
     await outbox.dispose();
@@ -630,10 +667,16 @@ void main() {
     );
 
     final event = makeEvent();
-    await outbox.broadcast(event, relays: const ['wss://a']);
+    await outbox.broadcast(
+      event,
+      relaySet: const RelaySet.explicit(['wss://a']),
+    );
     await waitFor(outbox, event.id, (r) => r.attempts >= 1);
 
-    await outbox.broadcast(event, relays: const ['wss://b']);
+    await outbox.broadcast(
+      event,
+      relaySet: const RelaySet.explicit(['wss://b']),
+    );
     final merged = await waitFor(outbox, event.id, (r) => r.relays.length == 2);
     expect(merged.relays, containsAll(['wss://a', 'wss://b']));
 
@@ -652,7 +695,10 @@ void main() {
     final event = makeEvent();
     await outbox.broadcast(
       event,
-      relays: const ['WSS://Relay.Example/', 'wss://relay.example'],
+      relaySet: const RelaySet.explicit([
+        'WSS://Relay.Example/',
+        'wss://relay.example',
+      ]),
     );
     final r = await waitFor(outbox, event.id, (r) => r.attempts >= 1);
     expect(r.relays, ['wss://relay.example']);
@@ -671,7 +717,10 @@ void main() {
       );
 
       final event = makeEvent();
-      await outbox.broadcast(event, relays: const ['wss://a']);
+      await outbox.broadcast(
+        event,
+        relaySet: const RelaySet.explicit(['wss://a']),
+      );
       final r = await waitFor(outbox, event.id, (r) => r.attempts >= 1);
       expect(r.status, BroadcastStatus.pending);
       expect(r.lastErrors['wss://a'], contains('no signer'));
@@ -684,7 +733,10 @@ void main() {
     final outbox = OfflineBroadcast(broadcastFn: FakeBroadcaster().fn, db: db);
     await outbox.dispose();
     expect(
-      () => outbox.broadcast(makeEvent(), relays: const ['wss://a']),
+      () => outbox.broadcast(
+        makeEvent(),
+        relaySet: const RelaySet.explicit(['wss://a']),
+      ),
       throwsStateError,
     );
   });

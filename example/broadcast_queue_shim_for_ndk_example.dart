@@ -1,5 +1,5 @@
 import 'package:broadcast_queue_shim_for_ndk/broadcast_queue_shim_for_ndk.dart';
-import 'package:ndk/ndk.dart';
+import 'package:ndk/ndk.dart' hide RelaySet;
 import 'package:sembast/sembast_io.dart';
 
 Future<void> main() async {
@@ -17,7 +17,8 @@ Future<void> main() async {
   final outbox = OfflineBroadcast.withNdk(ndk, db: db);
   outbox.start();
 
-  // 4. Fire off events as you would with NDK. The list of relays is required.
+  // 4. Fire off events with a relay set. This call returns without touching
+  //    the network: sets that need a relay list are resolved by the worker.
   final event = Nip01Event(
     pubKey: 'deadbeef' * 8,
     kind: 1,
@@ -26,7 +27,10 @@ Future<void> main() async {
   );
   await outbox.broadcast(
     event,
-    relays: const ['wss://relay.damus.io', 'wss://nos.lol'],
+    relaySet: RelaySet.fallback([
+      RelaySet.outbox(event.pubKey),
+      const RelaySet.explicit(['wss://relay.damus.io']),
+    ]),
   );
 
   // 5. When connectivity comes back, ask for an immediate retry pass.
