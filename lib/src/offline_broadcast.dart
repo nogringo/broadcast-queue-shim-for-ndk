@@ -204,8 +204,9 @@ class OfflineBroadcast {
   /// already exists, the new relays are merged into it and it is rescheduled
   /// for an immediate attempt: explicit relays join its relay list, a set that
   /// needs a lookup is resolved and its relays joined. The event payload is
-  /// *not* overwritten; the original event wins. The same event queued under a
-  /// different [pubkey] is a separate record.
+  /// *not* overwritten; the original event wins. A record stopped by [cancel]
+  /// is reopened. The same event queued under a different [pubkey] is a
+  /// separate record.
   ///
   /// For a replaceable or addressable [event], relays only keep the latest
   /// version, so queuing one supersedes the records of older versions that
@@ -236,6 +237,7 @@ class OfflineBroadcast {
             resolutionAttempts: 0,
             clearResolutionError: true,
             nextAttemptAt: now,
+            clearCancelled: true,
           ) ??
           _newRecord(
             event,
@@ -269,6 +271,7 @@ class OfflineBroadcast {
           nextAttemptAt: now,
           clearDelivered: !fullyAcked,
           clearFailed: !fullyAcked && !fullySettled,
+          clearCancelled: true,
         );
       } else {
         record = _newRecord(event, pubkey, now, relays: normalizedRelays);
@@ -327,7 +330,8 @@ class OfflineBroadcast {
   ///   relay is new, `deliveredAt` is cleared (the entry can no longer claim
   ///   100% delivery until the new relay acks); otherwise it is preserved.
   ///
-  /// A superseded record still gets this one push, but stays superseded.
+  /// A superseded or cancelled record still gets this one push, but keeps its
+  /// status.
   ///
   /// [pubkey] selects which record to rebroadcast, matching the value passed to
   /// [broadcast]. Returns `null` if no such record exists.
@@ -361,6 +365,34 @@ class OfflineBroadcast {
       unawaited(_attempt(key));
     }
     return updated;
+  }
+
+  /// Stops the retries of a pending record: it becomes
+  /// [BroadcastStatus.cancelled], leaves [watchPending] and stays in [listAll].
+  /// Its unresolved relay set and any push queued by [rebroadcast] are dropped.
+  /// A delivered, failed or superseded record keeps its status and only loses
+  /// a queued [rebroadcast] push.
+  ///
+  /// An attempt already in flight still completes and records its acks. Relays
+  /// that acked keep the event; cancelling does not delete it from them.
+  /// Calling [broadcast] again for the same record reopens it.
+  ///
+  /// [pubkey] selects which record to cancel, matching the value passed to
+  /// [broadcast]. Returns `null` if no such record exists.
+  Future<QueuedBroadcast?> cancel(String eventId, {String? pubkey}) async {
+    _ensureNotDisposed();
+    final key = QueuedBroadcast.keyFor(eventId: eventId, pubkey: pubkey);
+    return _store.update(key, (current) {
+      if (current.status == BroadcastStatus.pending) {
+        return current.copyWith(
+          cancelledAt: _now(),
+          clearPendingRelaySet: true,
+          clearForcedRelays: true,
+        );
+      }
+      if (current.forcedRelays == null) return null;
+      return current.copyWith(clearForcedRelays: true);
+    });
   }
 
   /// Triggers an immediate scan for due entries. Safe to call repeatedly;

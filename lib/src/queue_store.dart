@@ -110,6 +110,7 @@ class QueueStore {
         final nextAttemptAt = m['nextAttemptAt'] as int;
         if (nextAttemptAt > now) return false;
         if (m['supersededBy'] != null) return m['forcedRelays'] != null;
+        if (m['cancelledAt'] != null) return m['forcedRelays'] != null;
         if (m['pendingRelaySet'] != null) return true;
         if (m['deliveredAt'] == null && m['failedAt'] == null) return true;
         return m['forcedRelays'] != null;

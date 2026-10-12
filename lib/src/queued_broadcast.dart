@@ -20,6 +20,10 @@ enum BroadcastStatus {
   /// before this one was settled, so it is no longer retried. See
   /// [QueuedBroadcast.supersededBy].
   superseded,
+
+  /// The caller stopped its retries with [OfflineBroadcast.cancel] before it
+  /// was settled. See [QueuedBroadcast.cancelledAt].
+  cancelled,
 }
 
 /// A single broadcast tracked by [OfflineBroadcast].
@@ -116,6 +120,11 @@ class QueuedBroadcast {
   /// stays [BroadcastStatus.superseded] whatever happens to that version.
   final String? supersededBy;
 
+  /// Wall-clock millis (since epoch) when [OfflineBroadcast.cancel] stopped
+  /// this record's retries, or `null`. Cleared when `broadcast` queues the
+  /// same record again.
+  final int? cancelledAt;
+
   /// Creates a record. Most callers should not invoke this directly; records
   /// are produced by [OfflineBroadcast].
   QueuedBroadcast({
@@ -139,6 +148,7 @@ class QueuedBroadcast {
     required this.createdAt,
     this.forcedRelays,
     this.supersededBy,
+    this.cancelledAt,
   });
 
   /// The sembast record key for this entry.
@@ -154,6 +164,7 @@ class QueuedBroadcast {
   /// retryable, otherwise terminal.
   BroadcastStatus get status {
     if (supersededBy != null) return BroadcastStatus.superseded;
+    if (cancelledAt != null) return BroadcastStatus.cancelled;
     if (pendingRelaySet != null) return BroadcastStatus.pending;
     if (deliveredAt != null) return BroadcastStatus.delivered;
     if (failedAt != null) return BroadcastStatus.failed;
@@ -173,8 +184,8 @@ class QueuedBroadcast {
   ///
   /// Use `clearDelivered: true` to force-clear [deliveredAt] (`null` arg
   /// alone is ambiguous with "leave as-is" for nullable fields). Same idea
-  /// for `clearForcedRelays`, `clearPendingRelaySet` and
-  /// `clearResolutionError`.
+  /// for `clearForcedRelays`, `clearPendingRelaySet`, `clearResolutionError`
+  /// and `clearCancelled`.
   QueuedBroadcast copyWith({
     List<String>? relays,
     RelaySet? pendingRelaySet,
@@ -192,11 +203,13 @@ class QueuedBroadcast {
     int? failedAt,
     List<String>? forcedRelays,
     String? supersededBy,
+    int? cancelledAt,
     bool clearDelivered = false,
     bool clearFailed = false,
     bool clearForcedRelays = false,
     bool clearPendingRelaySet = false,
     bool clearResolutionError = false,
+    bool clearCancelled = false,
   }) {
     return QueuedBroadcast(
       id: id,
@@ -225,6 +238,7 @@ class QueuedBroadcast {
           ? null
           : (forcedRelays ?? this.forcedRelays),
       supersededBy: supersededBy ?? this.supersededBy,
+      cancelledAt: clearCancelled ? null : (cancelledAt ?? this.cancelledAt),
     );
   }
 
@@ -251,6 +265,7 @@ class QueuedBroadcast {
       'createdAt': createdAt,
       'forcedRelays': forcedRelays,
       'supersededBy': supersededBy,
+      'cancelledAt': cancelledAt,
     };
   }
 
@@ -284,6 +299,7 @@ class QueuedBroadcast {
       createdAt: map['createdAt'] as int,
       forcedRelays: (map['forcedRelays'] as List?)?.cast<String>(),
       supersededBy: map['supersededBy'] as String?,
+      cancelledAt: map['cancelledAt'] as int?,
     );
   }
 }

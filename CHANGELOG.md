@@ -1,11 +1,14 @@
 ## 0.7.0
 
-- **Breaking:** `BroadcastStatus` gains `superseded`. Exhaustive `switch`
-  statements on it need a new case.
+- **Breaking:** `BroadcastStatus` gains `superseded` and `cancelled`.
+  Exhaustive `switch` statements on it need new cases.
 - Queuing a replaceable or addressable event supersedes the pending records of
   its older versions: they stop retrying, become `BroadcastStatus.superseded`
   and get `QueuedBroadcast.supersededBy`. An older version queued after a newer
   one is never sent.
+- Add `cancel(id, {pubkey})`: stops the retries of a pending record, which
+  becomes `BroadcastStatus.cancelled` and gets `QueuedBroadcast.cancelledAt`.
+  Queuing it again with `broadcast` reopens it.
 
 ## 0.6.0
 

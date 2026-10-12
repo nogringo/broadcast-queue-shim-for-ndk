@@ -55,6 +55,16 @@ void main() {
         base.copyWith(supersededBy: 'newer').toMap(),
       );
       expect(restored.supersededBy, 'newer');
+      expect(
+        base.copyWith(deliveredAt: 1, cancelledAt: 1).status,
+        BroadcastStatus.cancelled,
+      );
+      expect(
+        QueuedBroadcast.fromMap(
+          base.copyWith(cancelledAt: 1).toMap(),
+        ).cancelledAt,
+        1,
+      );
     });
 
     test('keyFor composes pubkey and event id, bare when unattributed', () {

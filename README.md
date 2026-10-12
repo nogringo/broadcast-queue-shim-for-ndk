@@ -30,6 +30,8 @@ sits in front of `ndk.broadcast` and adds:
 - **Superseded versions.** Queuing a new version of a replaceable or
   addressable event (kind 0, 3, 10000-19999, 30000-39999) stops the retries of
   older versions still pending.
+- **Cancellation.** `cancel` stops the retries of a single pending entry and
+  keeps it in the store.
 - **Account-scoped clearing.** Attribute an entry to an account with the
   optional `pubkey` argument, then wipe just that account's queue on logout via
   `clearLocalAccountData`.
@@ -272,6 +274,22 @@ same value passed to `broadcast`; it returns `null` if no such record exists.
   until `r` acks. If `r` was already there, the historical state is
   preserved.
 
+### `cancel(id, {String? pubkey})`
+
+Stops the retries of a pending entry. It becomes `BroadcastStatus.cancelled`
+with a `cancelledAt` timestamp, leaves `watchPending()` and stays in
+`listAll()`. An unresolved relay set and a push queued by `rebroadcast` are
+dropped. `pubkey` selects the record, as for `rebroadcast`; it returns `null`
+if no such record exists.
+
+- An entry that is already delivered, failed or superseded keeps its status.
+  Only a queued `rebroadcast` push is dropped.
+- An attempt already in flight still completes and records its acks.
+- Relays that acked keep the event. To remove it from them, publish a NIP-09
+  `kind:5` deletion.
+- `broadcast` with the same event and `pubkey` reopens the entry.
+  `rebroadcast` forces one push and the entry stays cancelled.
+
 ### What "success" means
 
 The full target set must ack. NDK's own `considerDonePercent` knob is *not*
@@ -312,8 +330,8 @@ entry can become `delivered`.
   in the database until you remove it, via `clearLocalAccountData` /
   `clearAllLocalData` or by clearing sembast records directly.
 - **It does not apply a max-attempts limit.** Retryable failures continue with
-  exponential backoff until they ack, are manually rebroadcast, become a
-  terminal NIP-01 rejection, or hit the inaccessible-relay cutoff.
+  exponential backoff until they ack, are cancelled, become a terminal NIP-01
+  rejection, or hit the inaccessible-relay cutoff.
 
 ## Tuning
 
