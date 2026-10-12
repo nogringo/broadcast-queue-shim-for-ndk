@@ -40,7 +40,7 @@ sits in front of `ndk.broadcast` and adds:
 
 ```dart
 import 'package:broadcast_queue_shim_for_ndk/broadcast_queue_shim_for_ndk.dart';
-import 'package:ndk/ndk.dart' hide RelaySet;
+import 'package:ndk/ndk.dart';
 import 'package:sembast/sembast_io.dart';
 
 Future<void> main() async {
@@ -67,23 +67,20 @@ Future<void> main() async {
   // responsibility.
   await outbox.broadcast(
     event,
-    relaySet: const RelaySet.explicit([
+    relaySet: const UrlSet.explicit([
       'wss://relay.damus.io',
       'wss://nos.lol',
     ]),
   );
 
   // Or let the shim find the author's write relays later, offline included.
-  await outbox.broadcast(event, relaySet: RelaySet.outbox(myPubKey));
+  await outbox.broadcast(event, relaySet: UrlSet.outbox(myPubKey));
 }
 ```
 
-`package:ndk/ndk.dart` also exports a `RelaySet`. In a file that imports both
-packages, add `hide RelaySet` to the ndk import.
-
 ## Semantics
 
-### `broadcast(event, {required RelaySet relaySet, String? pubkey})`
+### `broadcast(event, {required UrlSet relaySet, String? pubkey})`
 
 Persists `event` and schedules an immediate attempt to the relays of
 `relaySet` (see [Relay sets](#relay-sets)). URLs are normalized (lowercased,
@@ -102,18 +99,25 @@ queued under a different `pubkey` is a separate record.
 
 ### Relay sets
 
-A `RelaySet` describes where an event goes instead of listing URLs:
+A `UrlSet` describes where an event goes instead of listing URLs. It comes
+from [`url_set_for_ndk`](https://pub.dev/packages/url_set_for_ndk), shared with
+the Blossom upload shim and re-exported by this package:
 
 ```dart
-RelaySet.explicit(['wss://a', 'wss://b'])  // fixed URLs
-RelaySet.outbox(pubkey)                    // NIP-65 write relays
-RelaySet.nip65(pubkey)                     // every NIP-65 relay, read and write
-RelaySet.inbox([pubkeys])                  // NIP-65 read relays of each pubkey
-RelaySet.dm([pubkeys])                     // NIP-17 DM relays (kind 10050)
-RelaySet.private(pubkey)                   // NIP-37 private relays (kind 10013)
-RelaySet.union([a, b])                     // every relay of every set
-RelaySet.fallback([a, b])                  // first set with at least one relay
+UrlSet.explicit(['wss://a', 'wss://b'])  // fixed URLs
+UrlSet.outbox(pubkey)                    // NIP-65 write relays
+UrlSet.nip65(pubkey)                     // every NIP-65 relay, read and write
+UrlSet.inbox(pubkey)                     // NIP-65 read relays
+UrlSet.dm(pubkey)                        // NIP-17 DM relays (kind 10050)
+UrlSet.private(pubkey)                   // NIP-37 private relays (kind 10013)
+UrlSet.union([a, b])                     // every relay of every set
+UrlSet.fallback([a, b])                  // first set with at least one relay
 ```
+
+Every leaf reads the list of one account. Combine several with `union`:
+`UrlSet.union([for (final p in recipients) UrlSet.dm(p)])`. `UrlSet.blossom`
+names Blossom servers, not relays: `broadcast` rejects it with an
+`ArgumentError`.
 
 Use `dm`, not `inbox`, for gift wraps. A user publishes their kind 10050 to
 their NIP-65 write relays, so a `dm` lookup first resolves the pubkey's NIP-65,

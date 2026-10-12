@@ -3,16 +3,14 @@ import 'dart:convert';
 import 'dart:math';
 
 import 'package:ndk/entities.dart' show RelayBroadcastResponse;
-import 'package:ndk/ndk.dart' hide RelaySet;
+import 'package:ndk/ndk.dart';
 import 'package:sembast/sembast.dart';
+import 'package:url_set_for_ndk/url_set_for_ndk.dart';
 
 import 'backoff.dart';
-import 'indexer_relays.dart';
-import 'ndk_relay_lists.dart';
 import 'queue_store.dart';
 import 'queued_broadcast.dart';
 import 'relay_host_filter.dart';
-import 'relay_set.dart';
 
 /// Function that hands an event off to the network. Matches the call pattern
 /// of `Ndk.broadcast.broadcast` with `specificRelays` always provided.
@@ -24,7 +22,7 @@ typedef BroadcastFn =
 /// Contract:
 ///  - `broadcast(event, relaySet: ...)` persists the event before returning,
 ///    without touching the network.
-///  - A [RelaySet] is resolved by the worker, once, then frozen into the
+///  - A [UrlSet] is resolved by the worker, once, then frozen into the
 ///    record's relays.
 ///  - Delivery is guaranteed in the eventual sense: the shim keeps retrying
 ///    each `pending` entry until every relay has acknowledged it or returned a
@@ -34,7 +32,7 @@ typedef BroadcastFn =
 ///    `clearLocalAccountData` and `clearAllLocalData`.
 class OfflineBroadcast {
   final BroadcastFn _broadcastFn;
-  final RelayListFn? _relayListFn;
+  final UrlListFn? _relayListFn;
   final QueueStore _store;
   final Duration _tickInterval;
   final Duration _initialBackoff;
@@ -54,7 +52,7 @@ class OfflineBroadcast {
 
   OfflineBroadcast._({
     required BroadcastFn broadcastFn,
-    required RelayListFn? relayListFn,
+    required UrlListFn? relayListFn,
     required Database db,
     required String storeName,
     required Duration tickInterval,
@@ -92,13 +90,13 @@ class OfflineBroadcast {
   /// `false`, global broadcaster exceptions, and relay-level OK responses do
   /// not increment this counter.
   ///
-  /// [relayListFn] resolves the relay lists a [RelaySet] refers to. Without
-  /// it, only sets built from [RelaySet.explicit] can be broadcast. The shim
+  /// [relayListFn] resolves the relay lists a [UrlSet] refers to. Without
+  /// it, only sets built from [UrlSet.explicit] can be broadcast. The shim
   /// puts no timeout on it: bound the network part yourself, and let a signer
   /// take as long as it needs.
   factory OfflineBroadcast({
     required BroadcastFn broadcastFn,
-    RelayListFn? relayListFn,
+    UrlListFn? relayListFn,
     required Database db,
     String storeName = 'broadcasts',
     Duration tickInterval = const Duration(seconds: 30),
@@ -141,7 +139,7 @@ class OfflineBroadcast {
   /// are filtered out, so a connected dev relay on localhost will not mask a
   /// real outage).
   ///
-  /// Relay lists for a [RelaySet] are read through `ndk.requests.query`, from
+  /// Relay lists for a [UrlSet] are read through `ndk.requests.query`, from
   /// NDK's cache first, on [relayListDiscoveryRelays]. [relayListQueryTimeout]
   /// bounds each query and defaults to NDK's query timeout. Decrypting a
   /// private relay list with the account's signer is never timed out.
@@ -169,7 +167,7 @@ class OfflineBroadcast {
     return OfflineBroadcast(
       broadcastFn: (event, relays) =>
           ndk.broadcast.broadcast(nostrEvent: event, specificRelays: relays),
-      relayListFn: ndkRelayListFn(
+      relayListFn: ndkUrlListFn(
         ndk,
         discoveryRelays: relayListDiscoveryRelays,
         queryTimeout: relayListQueryTimeout,
@@ -191,7 +189,8 @@ class OfflineBroadcast {
   ///
   /// A [relaySet] that needs a lookup is stored unresolved and resolved by the
   /// worker, so this call never waits on the network. One that needs no lookup
-  /// is resolved here and must yield at least one relay.
+  /// is resolved here and must yield at least one relay. A Blossom leaf throws
+  /// [ArgumentError]: it names servers, not relays.
   ///
   /// [pubkey] attributes the entry to a local account so it can later be
   /// dropped by [clearLocalAccountData]. It is a plain label, not `event.pubKey`:
@@ -215,12 +214,19 @@ class OfflineBroadcast {
   /// version older than one already in the store stores it superseded.
   Future<QueuedBroadcast> broadcast(
     Nip01Event event, {
-    required RelaySet relaySet,
+    required UrlSet relaySet,
     String? pubkey,
   }) async {
     _ensureNotDisposed();
+    if (relaySet.kinds.contains(UrlListKind.blossom)) {
+      throw ArgumentError.value(
+        relaySet,
+        'relaySet',
+        'reads Blossom server lists',
+      );
+    }
     if (relaySet.needsLookup && _relayListFn == null) {
-      throw StateError('this relay relaySet needs a relayListFn to resolve');
+      throw StateError('this relaySet needs a relayListFn to resolve');
     }
     final now = _now();
     final key = QueuedBroadcast.keyFor(eventId: event.id, pubkey: pubkey);
@@ -233,7 +239,7 @@ class OfflineBroadcast {
           existing?.copyWith(
             pendingRelaySet: pending == null
                 ? relaySet
-                : RelaySet.union([pending, relaySet]),
+                : UrlSet.union([pending, relaySet]),
             resolutionAttempts: 0,
             clearResolutionError: true,
             nextAttemptAt: now,
@@ -247,9 +253,8 @@ class OfflineBroadcast {
             pendingRelaySet: relaySet,
           );
     } else {
-      final resolved =
-          await resolveRelaySet(relaySet, _noLookup) as RelaysResolved;
-      final normalizedRelays = _dedupNormalized(resolved.relays);
+      final resolved = await resolveUrlSet(relaySet, _noLookup) as UrlsResolved;
+      final normalizedRelays = _dedupNormalized(resolved.urls);
       if (normalizedRelays.isEmpty) {
         throw ArgumentError.value(relaySet, 'relaySet', 'has no relay');
       }
@@ -289,7 +294,7 @@ class OfflineBroadcast {
     String? pubkey,
     int now, {
     required List<String> relays,
-    RelaySet? pendingRelaySet,
+    UrlSet? pendingRelaySet,
   }) => QueuedBroadcast(
     id: event.id,
     pubkey: pubkey,
@@ -309,9 +314,9 @@ class OfflineBroadcast {
     createdAt: now,
   );
 
-  static Future<RelayLookup> _noLookup(
+  static Future<UrlListLookup> _noLookup(
     String _,
-    RelayListKind _,
+    UrlListKind _,
     List<String> _,
   ) => throw StateError('explicit relay sets never look up a relay list');
 
@@ -697,7 +702,7 @@ class OfflineBroadcast {
         return null;
       }
       switch (resolution) {
-        case RelaysUnavailable(:final reason):
+        case UrlsUnavailable(:final reason):
           final attempts = current.resolutionAttempts + 1;
           final delay = computeBackoff(
             attempts: attempts,
@@ -710,7 +715,7 @@ class OfflineBroadcast {
             resolutionError: reason,
             nextAttemptAt: now + delay.inMilliseconds,
           );
-        case RelaysResolved(:final relays):
+        case UrlsResolved(urls: final relays):
           final merged = _dedupNormalized([...current.relays, ...relays]);
           final terminal = _terminalState(
             merged,
@@ -739,15 +744,15 @@ class OfflineBroadcast {
     return updated;
   }
 
-  Future<RelayResolution> _resolve(RelaySet set) async {
+  Future<UrlResolution> _resolve(UrlSet set) async {
     final relayListFn = _relayListFn;
     if (relayListFn == null) {
-      return const RelaysUnavailable('no relayListFn configured');
+      return const UrlsUnavailable('no relayListFn configured');
     }
     try {
-      return await resolveRelaySet(set, relayListFn);
+      return await resolveUrlSet(set, relayListFn);
     } catch (e) {
-      return RelaysUnavailable(e.toString());
+      return UrlsUnavailable(e.toString());
     }
   }
 

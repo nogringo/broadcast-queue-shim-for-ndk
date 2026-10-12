@@ -1,4 +1,4 @@
-import 'package:ndk/ndk.dart' hide RelaySet;
+import 'package:ndk/ndk.dart';
 
 /// NIP-01 address shared by every version of a replaceable or addressable
 /// [event], or `null` for any other kind.

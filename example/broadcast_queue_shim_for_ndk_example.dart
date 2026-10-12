@@ -1,5 +1,5 @@
 import 'package:broadcast_queue_shim_for_ndk/broadcast_queue_shim_for_ndk.dart';
-import 'package:ndk/ndk.dart' hide RelaySet;
+import 'package:ndk/ndk.dart';
 import 'package:sembast/sembast_io.dart';
 
 Future<void> main() async {
@@ -27,9 +27,9 @@ Future<void> main() async {
   );
   await outbox.broadcast(
     event,
-    relaySet: RelaySet.fallback([
-      RelaySet.outbox(event.pubKey),
-      const RelaySet.explicit(['wss://relay.damus.io']),
+    relaySet: UrlSet.fallback([
+      UrlSet.outbox(event.pubKey),
+      const UrlSet.explicit(['wss://relay.damus.io']),
     ]),
   );
 

@@ -10,7 +10,7 @@ import 'support/helpers.dart';
 
 const _alice = 'alice';
 const _bob = 'bob';
-const _relays = RelaySet.explicit(['wss://a']);
+const _relays = UrlSet.explicit(['wss://a']);
 
 void main() {
   late Database db;
@@ -25,7 +25,7 @@ void main() {
     await db.close();
   });
 
-  OfflineBroadcast newOutbox({RelayListFn? relayListFn}) => OfflineBroadcast(
+  OfflineBroadcast newOutbox({UrlListFn? relayListFn}) => OfflineBroadcast(
     broadcastFn: fake.fn,
     relayListFn: relayListFn,
     db: db,
@@ -63,12 +63,12 @@ void main() {
     final outbox = newOutbox(
       relayListFn: (_, _, _) async {
         lookups++;
-        return const RelayLookup.unavailable('offline');
+        return const UrlListLookup.unavailable('offline');
       },
     );
     final event = makeEvent();
 
-    await outbox.broadcast(event, relaySet: RelaySet.outbox(event.pubKey));
+    await outbox.broadcast(event, relaySet: UrlSet.outbox(event.pubKey));
     final cancelled = (await outbox.cancel(event.id))!;
     expect(cancelled.status, BroadcastStatus.cancelled);
     expect(cancelled.pendingRelaySet, isNull);

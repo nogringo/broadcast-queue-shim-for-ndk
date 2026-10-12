@@ -1,5 +1,5 @@
 import 'package:broadcast_queue_shim_for_ndk/broadcast_queue_shim_for_ndk.dart';
-import 'package:ndk/ndk.dart' hide RelaySet;
+import 'package:ndk/ndk.dart';
 import 'package:sembast/sembast_memory.dart';
 import 'package:test/test.dart';
 
@@ -8,7 +8,7 @@ import 'support/helpers.dart';
 
 const _alice = 'alice';
 const _bob = 'bob';
-const _relays = RelaySet.explicit(['wss://a']);
+const _relays = UrlSet.explicit(['wss://a']);
 
 Nip01Event _version({
   int kind = 10002,
@@ -40,7 +40,7 @@ void main() {
     await db.close();
   });
 
-  OfflineBroadcast newOutbox({RelayListFn? relayListFn}) => OfflineBroadcast(
+  OfflineBroadcast newOutbox({UrlListFn? relayListFn}) => OfflineBroadcast(
     broadcastFn: fake.fn,
     relayListFn: relayListFn,
     db: db,
@@ -116,18 +116,19 @@ void main() {
 
   test('an unresolved relay set of an older version is dropped', () async {
     final outbox = newOutbox(
-      relayListFn: (_, _, _) async => const RelayLookup.unavailable('offline'),
+      relayListFn: (_, _, _) async =>
+          const UrlListLookup.unavailable('offline'),
     );
     final v1 = _version(createdAt: 100);
     final v2 = _version(createdAt: 200);
 
-    await outbox.broadcast(v1, relaySet: RelaySet.outbox(v1.pubKey));
-    await outbox.broadcast(v2, relaySet: RelaySet.outbox(v2.pubKey));
+    await outbox.broadcast(v1, relaySet: UrlSet.outbox(v1.pubKey));
+    await outbox.broadcast(v2, relaySet: UrlSet.outbox(v2.pubKey));
     var old = (await outbox.get(v1.id))!;
     expect(old.status, BroadcastStatus.superseded);
     expect(old.pendingRelaySet, isNull);
 
-    old = await outbox.broadcast(v1, relaySet: RelaySet.outbox(v1.pubKey));
+    old = await outbox.broadcast(v1, relaySet: UrlSet.outbox(v1.pubKey));
     expect(old.status, BroadcastStatus.superseded);
     expect(old.pendingRelaySet, isNull);
     expect((await outbox.get(v1.id))!.pendingRelaySet, isNull);

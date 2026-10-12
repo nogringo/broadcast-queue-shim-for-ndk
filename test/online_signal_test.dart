@@ -2,7 +2,7 @@ import 'dart:async';
 
 import 'package:broadcast_queue_shim_for_ndk/broadcast_queue_shim_for_ndk.dart';
 import 'package:ndk/entities.dart' show RelayBroadcastResponse;
-import 'package:ndk/ndk.dart' hide RelaySet;
+import 'package:ndk/ndk.dart';
 import 'package:sembast/sembast_memory.dart';
 import 'package:test/test.dart';
 
@@ -64,7 +64,7 @@ void main() {
     // normally be picked up by every tick).
     await outbox.broadcast(
       _event(),
-      relaySet: const RelaySet.explicit(['wss://a']),
+      relaySet: const UrlSet.explicit(['wss://a']),
     );
     outbox.start();
     signal.add(false);
@@ -99,7 +99,7 @@ void main() {
 
     await outbox.broadcast(
       _event(),
-      relaySet: const RelaySet.explicit(['wss://a']),
+      relaySet: const UrlSet.explicit(['wss://a']),
     );
     await _flush();
     final base = fake.calls;
@@ -140,7 +140,7 @@ void main() {
 
     await outbox.broadcast(
       _event(),
-      relaySet: const RelaySet.explicit(['wss://a']),
+      relaySet: const UrlSet.explicit(['wss://a']),
     );
     outbox.start();
     signal.add(false);

@@ -1,3 +1,19 @@
+## 0.8.0
+
+- **Breaking:** `RelaySet` moves to the
+  [`url_set_for_ndk`](https://pub.dev/packages/url_set_for_ndk) package as
+  `UrlSet`, re-exported by this one. Rename `RelaySet` to `UrlSet`, and the
+  related types to match: `RelayListFn` to `UrlListFn`, `RelayLookup` to
+  `UrlListLookup` (`RelayListFound.relays` becomes `UrlListFound.urls`),
+  `RelayListKind` to `UrlListKind`, `ndkRelayListFn` to `ndkUrlListFn`,
+  `OutboxRelays` to `OutboxUrls`, etc. The `hide RelaySet` on the ndk import is
+  no longer needed.
+- **Breaking:** `UrlSet.inbox` and `UrlSet.dm` take one pubkey. Replace
+  `RelaySet.dm(pubkeys)` with
+  `UrlSet.union([for (final p in pubkeys) UrlSet.dm(p)])`. Queues stored by
+  earlier versions load unchanged.
+- `broadcast` rejects `UrlSet.blossom` leaves, which name Blossom servers.
+
 ## 0.7.0
 
 - **Breaking:** `BroadcastStatus` gains `superseded` and `cancelled`.

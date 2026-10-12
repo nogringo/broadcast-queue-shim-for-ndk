@@ -1,6 +1,5 @@
-import 'package:ndk/ndk.dart' hide RelaySet;
-
-import 'relay_set.dart';
+import 'package:ndk/ndk.dart';
+import 'package:url_set_for_ndk/url_set_for_ndk.dart';
 
 /// Status of a queued broadcast.
 enum BroadcastStatus {
@@ -53,7 +52,7 @@ class QueuedBroadcast {
 
   /// Relay set still to resolve, or `null` once its relays are frozen into
   /// [relays]. While non-null the record is [BroadcastStatus.pending].
-  final RelaySet? pendingRelaySet;
+  final UrlSet? pendingRelaySet;
 
   /// Consecutive resolutions of [pendingRelaySet] that ended unavailable.
   /// Drives the backoff until the set resolves.
@@ -188,7 +187,7 @@ class QueuedBroadcast {
   /// and `clearCancelled`.
   QueuedBroadcast copyWith({
     List<String>? relays,
-    RelaySet? pendingRelaySet,
+    UrlSet? pendingRelaySet,
     int? resolutionAttempts,
     String? resolutionError,
     List<String>? ackedRelays,
@@ -278,7 +277,7 @@ class QueuedBroadcast {
       relays: (map['relays'] as List).cast<String>(),
       pendingRelaySet: map['pendingRelaySet'] == null
           ? null
-          : RelaySet.fromMap(map['pendingRelaySet'] as Map),
+          : UrlSet.fromMap(map['pendingRelaySet'] as Map),
       resolutionAttempts: (map['resolutionAttempts'] as int?) ?? 0,
       resolutionError: map['resolutionError'] as String?,
       ackedRelays: (map['ackedRelays'] as List).cast<String>(),
