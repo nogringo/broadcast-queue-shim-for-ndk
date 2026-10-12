@@ -1,3 +1,8 @@
+## 0.8.1
+
+- Widen the `ndk` constraint to `>=0.10.0-dev.7 <0.12.0` so the shim can be
+  used alongside ndk 0.11.x. The lower bound matches `url_set_for_ndk`.
+
 ## 0.8.0
 
 - **Breaking:** `RelaySet` moves to the
