@@ -15,6 +15,11 @@ enum BroadcastStatus {
   /// Monotonic: once a record reaches this state the shim never demotes it
   /// back to `pending` on its own.
   delivered,
+
+  /// A newer version of the same replaceable or addressable event was queued
+  /// before this one was settled, so it is no longer retried. See
+  /// [QueuedBroadcast.supersededBy].
+  superseded,
 }
 
 /// A single broadcast tracked by [OfflineBroadcast].
@@ -106,6 +111,11 @@ class QueuedBroadcast {
   /// eligible for one more push without rewriting its history.
   final List<String>? forcedRelays;
 
+  /// Id of the newer version of this replaceable or addressable event that
+  /// stopped its retries, or `null`. Set once and never cleared: the record
+  /// stays [BroadcastStatus.superseded] whatever happens to that version.
+  final String? supersededBy;
+
   /// Creates a record. Most callers should not invoke this directly; records
   /// are produced by [OfflineBroadcast].
   QueuedBroadcast({
@@ -128,6 +138,7 @@ class QueuedBroadcast {
     required this.failedAt,
     required this.createdAt,
     this.forcedRelays,
+    this.supersededBy,
   });
 
   /// The sembast record key for this entry.
@@ -142,6 +153,7 @@ class QueuedBroadcast {
   /// `pending` while the relay set is unresolved or any relay is still
   /// retryable, otherwise terminal.
   BroadcastStatus get status {
+    if (supersededBy != null) return BroadcastStatus.superseded;
     if (pendingRelaySet != null) return BroadcastStatus.pending;
     if (deliveredAt != null) return BroadcastStatus.delivered;
     if (failedAt != null) return BroadcastStatus.failed;
@@ -179,6 +191,7 @@ class QueuedBroadcast {
     int? deliveredAt,
     int? failedAt,
     List<String>? forcedRelays,
+    String? supersededBy,
     bool clearDelivered = false,
     bool clearFailed = false,
     bool clearForcedRelays = false,
@@ -211,6 +224,7 @@ class QueuedBroadcast {
       forcedRelays: clearForcedRelays
           ? null
           : (forcedRelays ?? this.forcedRelays),
+      supersededBy: supersededBy ?? this.supersededBy,
     );
   }
 
@@ -236,6 +250,7 @@ class QueuedBroadcast {
       'failedAt': failedAt,
       'createdAt': createdAt,
       'forcedRelays': forcedRelays,
+      'supersededBy': supersededBy,
     };
   }
 
@@ -268,6 +283,7 @@ class QueuedBroadcast {
       failedAt: map['failedAt'] as int?,
       createdAt: map['createdAt'] as int,
       forcedRelays: (map['forcedRelays'] as List?)?.cast<String>(),
+      supersededBy: map['supersededBy'] as String?,
     );
   }
 }

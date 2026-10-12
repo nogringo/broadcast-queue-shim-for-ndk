@@ -27,6 +27,9 @@ sits in front of `ndk.broadcast` and adds:
   recipients' inboxes, NIP-17 DM relays or NIP-37 private relays without
   knowing the URLs yet. The
   set is stored as is and resolved by the worker once online, then frozen.
+- **Superseded versions.** Queuing a new version of a replaceable or
+  addressable event (kind 0, 3, 10000-19999, 30000-39999) stops the retries of
+  older versions still pending.
 - **Account-scoped clearing.** Attribute an entry to an account with the
   optional `pubkey` argument, then wipe just that account's queue on logout via
   `clearLocalAccountData`.
@@ -173,6 +176,27 @@ starts over on the next run.
 
 A "not found" answer from a fast relay can arrive while a slower relay holding
 the list times out.
+
+### Replaceable and addressable events
+
+Relays keep only the latest version of a replaceable (kind 0, 3,
+10000-19999) or addressable (kind 30000-39999, per `d` tag) event: the highest
+`created_at`, then the lowest id. When `broadcast` queues such an event, every
+record of an older version of the same address that is still pending becomes
+`BroadcastStatus.superseded`:
+
+- it is no longer retried, and an unresolved relay set is dropped;
+- `supersededBy` holds the id of the version that replaced it;
+- it leaves `watchPending()` but stays in `listAll()`.
+
+This spans every `pubkey` label, since relays do not care which local account
+queued a version. Queuing a version older than one already in the store,
+delivered or not, stores it superseded and never sends it. Older versions that
+were already delivered or failed keep their status. `rebroadcast` still forces
+one push of a superseded record, which stays superseded.
+
+Edit a NIP-65 list twice offline and only the second version goes out once
+back online.
 
 ### Account-scoped clearing
 

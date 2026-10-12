@@ -206,6 +206,12 @@ class OfflineBroadcast {
   /// needs a lookup is resolved and its relays joined. The event payload is
   /// *not* overwritten; the original event wins. The same event queued under a
   /// different [pubkey] is a separate record.
+  ///
+  /// For a replaceable or addressable [event], relays only keep the latest
+  /// version, so queuing one supersedes the records of older versions that
+  /// are still pending, whatever their [pubkey]: they become
+  /// [BroadcastStatus.superseded] and are no longer retried. Queuing a
+  /// version older than one already in the store stores it superseded.
   Future<QueuedBroadcast> broadcast(
     Nip01Event event, {
     required RelaySet relaySet,
@@ -268,11 +274,11 @@ class OfflineBroadcast {
         record = _newRecord(event, pubkey, now, relays: normalizedRelays);
       }
     }
-    await _store.put(record);
+    final stored = await _store.put(record);
 
     // Kick off the first attempt without blocking the caller.
     unawaited(_attempt(record.key));
-    return record;
+    return stored;
   }
 
   QueuedBroadcast _newRecord(
@@ -320,6 +326,8 @@ class OfflineBroadcast {
   ///   schedules an immediate one-shot push to that single relay. If the
   ///   relay is new, `deliveredAt` is cleared (the entry can no longer claim
   ///   100% delivery until the new relay acks); otherwise it is preserved.
+  ///
+  /// A superseded record still gets this one push, but stays superseded.
   ///
   /// [pubkey] selects which record to rebroadcast, matching the value passed to
   /// [broadcast]. Returns `null` if no such record exists.

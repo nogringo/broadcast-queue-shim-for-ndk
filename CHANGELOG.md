@@ -1,3 +1,12 @@
+## 0.7.0
+
+- **Breaking:** `BroadcastStatus` gains `superseded`. Exhaustive `switch`
+  statements on it need a new case.
+- Queuing a replaceable or addressable event supersedes the pending records of
+  its older versions: they stop retrying, become `BroadcastStatus.superseded`
+  and get `QueuedBroadcast.supersededBy`. An older version queued after a newer
+  one is never sent.
+
 ## 0.6.0
 
 - **Breaking:** require `ndk: ^0.10.0-dev.1`.

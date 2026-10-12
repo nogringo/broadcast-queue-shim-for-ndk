@@ -1,6 +1,7 @@
 import 'package:sembast/sembast.dart';
 
 import 'queued_broadcast.dart';
+import 'replaceable.dart';
 
 /// Sembast-backed persistent store for [QueuedBroadcast] records.
 ///
@@ -20,8 +21,54 @@ class QueueStore {
     return QueuedBroadcast.fromMap(_normalize(map));
   }
 
-  Future<void> put(QueuedBroadcast record) async {
-    await _store.record(record.key).put(_db, record.toMap());
+  /// Writes [record], then, in the same transaction, supersedes every record
+  /// of an older version of the same replaceable or addressable event that
+  /// is still owed an attempt, [record] included. Returns [record] as stored.
+  Future<QueuedBroadcast> put(QueuedBroadcast record) {
+    return _db.transaction((txn) async {
+      await _store.record(record.key).put(txn, record.toMap());
+      final address = replaceableAddress(record.event);
+      if (address == null) return record;
+
+      final sameAuthorAndKind = Finder(
+        filter: Filter.custom((r) {
+          final event = (r.value as Map)['event'] as Map;
+          return event['kind'] == record.event.kind &&
+              event['pubkey'] == record.event.pubKey;
+        }),
+      );
+      final versions = (await _store.find(txn, finder: sameAuthorAndKind))
+          .map((r) => QueuedBroadcast.fromMap(_normalize(r.value)))
+          .where((r) => replaceableAddress(r.event) == address)
+          .toList();
+      final newest = versions
+          .map((r) => r.event)
+          .reduce((a, b) => replaces(b, a) ? b : a);
+
+      var stored = record;
+      for (final version in versions) {
+        if (version.id == newest.id) continue;
+        final QueuedBroadcast superseded;
+        if (version.supersededBy == null) {
+          final owed =
+              version.status == BroadcastStatus.pending ||
+              version.forcedRelays != null;
+          if (!owed) continue;
+          superseded = version.copyWith(
+            supersededBy: newest.id,
+            clearPendingRelaySet: true,
+            clearForcedRelays: true,
+          );
+        } else if (version.pendingRelaySet != null) {
+          superseded = version.copyWith(clearPendingRelaySet: true);
+        } else {
+          continue;
+        }
+        await _store.record(version.key).put(txn, superseded.toMap());
+        if (version.key == record.key) stored = superseded;
+      }
+      return stored;
+    });
   }
 
   /// Atomically read-modify-write a record. The mutator runs inside a sembast
@@ -62,6 +109,7 @@ class QueueStore {
         final m = record.value as Map;
         final nextAttemptAt = m['nextAttemptAt'] as int;
         if (nextAttemptAt > now) return false;
+        if (m['supersededBy'] != null) return m['forcedRelays'] != null;
         if (m['pendingRelaySet'] != null) return true;
         if (m['deliveredAt'] == null && m['failedAt'] == null) return true;
         return m['forcedRelays'] != null;
@@ -108,6 +156,7 @@ class QueueStore {
         .map(
           (snaps) => snaps
               .map((s) => QueuedBroadcast.fromMap(_normalize(s.value)))
+              .where((r) => r.status == BroadcastStatus.pending)
               .toList(growable: false),
         );
   }
