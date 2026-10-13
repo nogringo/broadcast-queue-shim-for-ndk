@@ -1,3 +1,8 @@
+## 0.8.2
+
+- Accept `url_set_for_ndk` 0.2.0 alongside 0.1, so the queue can be used with
+  `sync_engine_shim_for_ndk` 0.9.0. Nothing changed in the code.
+
 ## 0.8.1
 
 - Widen the `ndk` constraint to `>=0.10.0-dev.7 <0.12.0` so the shim can be
